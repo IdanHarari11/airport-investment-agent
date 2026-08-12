@@ -33,7 +33,9 @@ const UnmetDemandInsightSchema = z.object({
 export const AgentResponseSchema = z.object({
   answer: z
     .string()
-    .describe("Concise analyst-facing explanation of findings"),
+    .describe(
+      "Short analyst prose only (typically 3–6 sentences). Do not dump raw tables; UI cards show numbers.",
+    ),
   airports: z
     .array(
       z.object({
@@ -71,21 +73,34 @@ export const AgentResponseSchema = z.object({
           .nullable(),
       }),
     )
-    .nullable(),
-  /** Server-filled from tools; model may leave null. */
-  congestion: z.array(CongestionInsightSchema).nullable(),
-  longHaul: z.array(LongHaulInsightSchema).nullable(),
-  unmetDemand: z.array(UnmetDemandInsightSchema).nullable(),
-  assumptions: z.array(z.string()),
+    .nullable()
+    .describe("ALWAYS null — server overwrites from tool JSON"),
+  congestion: z
+    .array(CongestionInsightSchema)
+    .nullable()
+    .describe("ALWAYS null — server overwrites from tool JSON"),
+  longHaul: z
+    .array(LongHaulInsightSchema)
+    .nullable()
+    .describe("ALWAYS null — server overwrites from tool JSON"),
+  unmetDemand: z
+    .array(UnmetDemandInsightSchema)
+    .nullable()
+    .describe("ALWAYS null — server overwrites from tool JSON"),
+  assumptions: z
+    .array(z.string())
+    .describe("2–5 short assumption lines; server may append data-period notes"),
   confidence: z.enum(["high", "medium", "low"]),
-  sources: z.array(
-    z.object({
-      name: z.string(),
-      url: z.string().nullable(),
-      period: z.string().nullable(),
-      notes: z.string().nullable(),
-    }),
-  ),
+  sources: z
+    .array(
+      z.object({
+        name: z.string(),
+        url: z.string().nullable(),
+        period: z.string().nullable(),
+        notes: z.string().nullable(),
+      }),
+    )
+    .describe("Prefer [] — server injects sources from the data provider"),
 });
 
 export type AgentResponse = z.infer<typeof AgentResponseSchema>;
