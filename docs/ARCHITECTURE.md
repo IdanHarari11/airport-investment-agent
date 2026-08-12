@@ -1,4 +1,14 @@
-# Architecture
+# Architecture — Airport Investment Intelligence Agent
+
+Short design / architecture document for the FDE take-home deliverable.
+
+| Exam deliverable section | Where in this doc |
+|---|---|
+| Scoring methodology | [Scoring methodology](#scoring-methodology) |
+| Key tradeoffs | [Tradeoffs](#tradeoffs) |
+| Where / how AI is used | [AI usage](#ai-usage) |
+
+Also covers: runtime flow, public-data strategy, assumptions / uncertainty / scoping, and the voice bonus.
 
 ## Architecture
 
