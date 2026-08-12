@@ -23,6 +23,7 @@
 # misc
 .DS_Store
 *.pem
+.firecrawl/
 
 # debug
 npm-debug.log*
@@ -30,8 +31,25 @@ yarn-debug.log*
 yarn-error.log*
 .pnpm-debug.log*
 
-# env files (can opt-in for committing if needed)
-.env*
+# env files
+.env
+.env.local
+.env.*.local
+!.env.example
+
+# local python
+.venv/
+__pycache__/
+
+# Next.js auto-generated agent rule files (disabled via next.config)
+AGENTS.md
+CLAUDE.md
+
+# large raw government downloads (normalized JSON is committed)
+/data/raw/
+
+# regenerated public REST API snapshots (T-100 + NTAD Facilities)
+/data/cache/
 
 # vercel
 .vercel
