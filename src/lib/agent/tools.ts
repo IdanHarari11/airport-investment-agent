@@ -386,14 +386,12 @@ export const listDatasetCoverage = tool(
   async ({ includeSampleAirports }) => {
     const p = provider();
     const config = p.getConfig();
-    const currency = getDataCurrencySummary();
     return JSON.stringify({
       airportCount: p.listAirports().length,
       regions: [...new Set(p.listAirports().map((a) => a.region))].sort(),
       newEnglandStates: NEW_ENGLAND_STATES,
       scoringWeights: config.scoringWeights,
       longHaulThresholdMiles: config.longHaulThresholdMiles,
-      dataCurrency: currency,
       sampleAirports: includeSampleAirports
         ? p.listAirports().slice(0, 15).map((a) => a.iata)
         : [],
