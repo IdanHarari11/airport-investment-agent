@@ -4,6 +4,14 @@ export type StoredUiMessage = ChatMessage & {
   id: string;
   structured?: AgentResponse;
   error?: string;
+  /** Waiting for an assistant reply; survives refresh for auto-retry. */
+  pending?: boolean;
+};
+
+export type PendingRetry = {
+  conversationId: string;
+  userMessage: StoredUiMessage;
+  history: Array<{ role: "user" | "assistant"; content: string }>;
 };
 
 export type StoredConversation = {
@@ -149,10 +157,11 @@ export function getActiveConversation(
   );
 }
 
-export function persistActiveMessages(
+export function persistConversationMessages(
   userId: string,
   conversationId: string,
   messages: StoredUiMessage[],
+  options?: { setActive?: boolean },
 ): UserSessionStore {
   const store = loadUserStore(userId);
   const existing = store.conversations.find((c) => c.id === conversationId);
@@ -169,11 +178,109 @@ export function persistActiveMessages(
     : [conversation, ...store.conversations];
   const next: UserSessionStore = {
     ...store,
-    activeConversationId: conversationId,
+    activeConversationId: options?.setActive
+      ? conversationId
+      : store.activeConversationId,
     conversations,
   };
   saveUserStore(next);
   return next;
+}
+
+export function persistActiveMessages(
+  userId: string,
+  conversationId: string,
+  messages: StoredUiMessage[],
+): UserSessionStore {
+  return persistConversationMessages(userId, conversationId, messages, {
+    setActive: true,
+  });
+}
+
+/** Clear pending on a user turn (e.g. superseded by a newer send in the same chat). */
+export function clearMessagePending(
+  userId: string,
+  conversationId: string,
+  messageId: string,
+): UserSessionStore {
+  const store = loadUserStore(userId);
+  const existing = store.conversations.find((c) => c.id === conversationId);
+  if (!existing) return store;
+  const messages = existing.messages.map((message) =>
+    message.id === messageId ? { ...message, pending: undefined } : message,
+  );
+  return persistConversationMessages(userId, conversationId, messages);
+}
+
+/**
+ * Attach an assistant reply to a specific conversation and clear the user turn's pending flag.
+ * Does not change which conversation is active — safe for background completions.
+ */
+export function applyAssistantReply(params: {
+  userId: string;
+  conversationId: string;
+  userMessageId: string;
+  assistant: StoredUiMessage;
+}): UserSessionStore {
+  const store = loadUserStore(params.userId);
+  const existing = store.conversations.find(
+    (c) => c.id === params.conversationId,
+  );
+  if (!existing) return store;
+
+  const userIndex = existing.messages.findIndex(
+    (m) => m.id === params.userMessageId,
+  );
+  if (userIndex < 0) return store;
+
+  const cleared = existing.messages.map((message) =>
+    message.id === params.userMessageId
+      ? { ...message, pending: undefined }
+      : message,
+  );
+
+  const following = cleared[userIndex + 1];
+  if (following?.role === "assistant") {
+    return persistConversationMessages(
+      params.userId,
+      params.conversationId,
+      cleared,
+    );
+  }
+
+  const messages = [
+    ...cleared.slice(0, userIndex + 1),
+    params.assistant,
+    ...cleared.slice(userIndex + 1),
+  ];
+  return persistConversationMessages(
+    params.userId,
+    params.conversationId,
+    messages,
+  );
+}
+
+/** User turns marked pending with no assistant reply yet — candidates for post-refresh retry. */
+export function findPendingRetries(store: UserSessionStore): PendingRetry[] {
+  const retries: PendingRetry[] = [];
+  for (const conversation of store.conversations) {
+    for (let i = 0; i < conversation.messages.length; i++) {
+      const message = conversation.messages[i]!;
+      if (message.role !== "user" || !message.pending) continue;
+      const next = conversation.messages[i + 1];
+      if (next?.role === "assistant") continue;
+      const history = conversation.messages
+        .slice(0, i)
+        .filter((m) => !m.error)
+        .map(({ role, content }) => ({ role, content }));
+      retries.push({
+        conversationId: conversation.id,
+        userMessage: message,
+        history,
+      });
+    }
+  }
+  return retries;
 }
 
 export function startNewConversation(userId: string): UserSessionStore {

@@ -11,10 +11,14 @@ import {
 } from "react";
 import type { AgentResponse } from "@/lib/agent/types";
 import {
+  applyAssistantReply,
+  clearMessagePending,
+  findPendingRetries,
   getActiveConversation,
   getOrCreateClientUserId,
   loadUserStore,
   persistActiveMessages,
+  persistConversationMessages,
   resetClientUserIdentity,
   setPreferredLanguage,
   startNewConversation,
@@ -45,6 +49,9 @@ type ToolRun = {
   startedAt: number;
   endedAt?: number;
 };
+
+/** Survives React Strict Mode remounts within the same page load. */
+const resumedPendingIds = new Set<string>();
 
 function ScrollDownIcon() {
   return (
@@ -97,8 +104,19 @@ export function ChatApp() {
   const scrollRef = useRef<HTMLDivElement | null>(null);
   const bottomRef = useRef<HTMLDivElement | null>(null);
   const inputRef = useRef<HTMLTextAreaElement | null>(null);
-  const abortRef = useRef<AbortController | null>(null);
-  const requestGenRef = useRef(0);
+  /** In-flight abort controllers keyed by conversation id. */
+  const abortByConversationRef = useRef<Map<string, AbortController>>(
+    new Map(),
+  );
+  /** Monotonic request generation per conversation (supersede same-chat turns). */
+  const requestGenByConversationRef = useRef<Map<string, number>>(new Map());
+  const conversationIdRef = useRef(conversationId);
+  const loadingConversationsRef = useRef<Set<string>>(new Set());
+  const resumeStartedRef = useRef(false);
+
+  useEffect(() => {
+    conversationIdRef.current = conversationId;
+  }, [conversationId]);
 
   useEffect(() => {
     const userId = getOrCreateClientUserId();
@@ -174,10 +192,15 @@ export function ChatApp() {
     return () => el.removeEventListener("scroll", onScroll);
   }, [updateScrollState]);
 
+  function setConversationLoading(targetId: string, value: boolean) {
+    if (value) loadingConversationsRef.current.add(targetId);
+    else loadingConversationsRef.current.delete(targetId);
+    if (conversationIdRef.current === targetId) {
+      setLoading(value);
+    }
+  }
+
   function beginNewChat() {
-    abortRef.current?.abort();
-    abortRef.current = null;
-    requestGenRef.current += 1;
     if (!clientUserId) return;
     const store = startNewConversation(clientUserId);
     const active = getActiveConversation(store);
@@ -185,30 +208,32 @@ export function ChatApp() {
     setConversations(store.conversations);
     setMessages([]);
     setError(null);
-    setLoading(false);
+    setLoading(loadingConversationsRef.current.has(active.id));
     setActiveTools([]);
     setShowScrollButton(false);
   }
 
   function openConversation(id: string) {
     if (!clientUserId || id === conversationId) return;
-    abortRef.current?.abort();
-    abortRef.current = null;
-    requestGenRef.current += 1;
     const store = switchConversation(clientUserId, id);
     const active = getActiveConversation(store);
     setConversationId(active.id);
     setConversations(store.conversations);
     setMessages(active.messages);
     setError(null);
-    setLoading(false);
+    setLoading(loadingConversationsRef.current.has(active.id));
     setActiveTools([]);
   }
 
   function resetLocalIdentity() {
-    abortRef.current?.abort();
-    abortRef.current = null;
-    requestGenRef.current += 1;
+    for (const controller of abortByConversationRef.current.values()) {
+      controller.abort();
+    }
+    abortByConversationRef.current.clear();
+    requestGenByConversationRef.current.clear();
+    loadingConversationsRef.current.clear();
+    resumeStartedRef.current = false;
+    resumedPendingIds.clear();
     const userId = resetClientUserIdentity();
     const store = loadUserStore(userId);
     const active = getActiveConversation(store);
@@ -243,51 +268,93 @@ export function ChatApp() {
       .map(({ role, content }) => ({ role, content }))
       .slice(-40);
 
-    abortRef.current?.abort();
-    abortRef.current = null;
-    requestGenRef.current += 1;
     setMessages(truncated);
     setError(null);
-    setLoading(false);
     setActiveTools([]);
-    void sendMessage(userContent, { history });
+    void sendMessage(userContent, { history, seedMessages: truncated });
   }
 
   async function sendMessage(
     raw: string,
-    options?: { history?: Array<{ role: "user" | "assistant"; content: string }> },
+    options?: {
+      history?: Array<{ role: "user" | "assistant"; content: string }>;
+      conversationId?: string;
+      /** Resume an existing pending user turn after refresh (do not append again). */
+      resumeUserMessageId?: string;
+      /** Explicit message list when React state is not yet flushed (e.g. regenerate). */
+      seedMessages?: UiMessage[];
+    },
   ) {
     const message = raw.trim();
-    if (!message || !hydrated) return;
+    const targetConversationId = options?.conversationId ?? conversationId;
+    const userId = clientUserId;
+    if (!message || !hydrated || !userId || !targetConversationId) return;
 
-    // Allow navigation / new prompts while a reply is generating:
-    // abort the in-flight request and start a fresh turn.
-    abortRef.current?.abort();
+    // Supersede only an in-flight request for this same conversation.
+    const previous = abortByConversationRef.current.get(targetConversationId);
+    previous?.abort();
     const controller = new AbortController();
-    abortRef.current = controller;
-    const requestGen = ++requestGenRef.current;
+    abortByConversationRef.current.set(targetConversationId, controller);
+    const requestGen =
+      (requestGenByConversationRef.current.get(targetConversationId) ?? 0) + 1;
+    requestGenByConversationRef.current.set(targetConversationId, requestGen);
 
-    const priorHistory = (
-      options?.history ??
-      messages
-        .filter((m) => !m.error)
-        .map(({ role, content }) => ({ role, content }))
-    ).slice(-40);
+    const isActive = () => conversationIdRef.current === targetConversationId;
+    const isCurrentRequest = () =>
+      requestGenByConversationRef.current.get(targetConversationId) ===
+      requestGen;
+
+    let userMessageId = options?.resumeUserMessageId;
+    let priorHistory = options?.history;
+
+    if (!userMessageId) {
+      const baseMessages =
+        options?.seedMessages ??
+        (isActive()
+          ? messages
+          : (loadUserStore(userId).conversations.find(
+              (c) => c.id === targetConversationId,
+            )?.messages ?? []));
+      priorHistory = (
+        options?.history ??
+        baseMessages
+          .filter((m) => !m.error && !m.pending)
+          .map(({ role, content }) => ({ role, content }))
+      ).slice(-40);
+
+      const userMessage: UiMessage = {
+        id: crypto.randomUUID(),
+        role: "user",
+        content: message,
+        pending: true,
+      };
+      userMessageId = userMessage.id;
+
+      // Persist immediately so a refresh before the React effect still keeps pending.
+      const nextMessages = [...baseMessages, userMessage];
+      const nextStore = persistConversationMessages(
+        userId,
+        targetConversationId,
+        nextMessages,
+        { setActive: isActive() },
+      );
+      setConversations(nextStore.conversations);
+      if (isActive()) {
+        setMessages(nextMessages);
+      }
+    }
+
     const detected = detectLanguage(message, preferredLanguage);
     rememberLanguage(detected.bcp47);
 
-    setError(null);
-    setInput("");
-    setStickToBottom(true);
-    setStatusMessage(`Understanding question… (${detected.label})`);
-    setActiveTools([]);
-    const userMessage: UiMessage = {
-      id: crypto.randomUUID(),
-      role: "user",
-      content: message,
-    };
-    setMessages((prev) => [...prev, userMessage]);
-    setLoading(true);
+    if (isActive()) {
+      setError(null);
+      setInput("");
+      setStickToBottom(true);
+      setStatusMessage(`Understanding question… (${detected.label})`);
+      setActiveTools([]);
+    }
+    setConversationLoading(targetConversationId, true);
 
     try {
       const res = await fetch("/api/chat", {
@@ -299,8 +366,8 @@ export function ChatApp() {
         signal: controller.signal,
         body: JSON.stringify({
           message,
-          history: priorHistory,
-          clientUserId: clientUserId || undefined,
+          history: (priorHistory ?? []).slice(-40),
+          clientUserId: userId || undefined,
           language: detected.iso639,
         }),
       });
@@ -320,7 +387,7 @@ export function ChatApp() {
       while (true) {
         const { done, value } = await reader.read();
         if (done) break;
-        if (requestGen !== requestGenRef.current) return;
+        if (!isCurrentRequest()) return;
         buffer += decoder.decode(value, { stream: true });
         const chunks = buffer.split("\n\n");
         buffer = chunks.pop() ?? "";
@@ -344,6 +411,15 @@ export function ChatApp() {
           } catch {
             continue;
           }
+
+          if (payload.type === "final" && payload.response) {
+            finalResponse = payload.response;
+          }
+          if (payload.type === "error") {
+            throw new Error(payload.error || "Request failed");
+          }
+
+          if (!isActive() || !isCurrentRequest()) continue;
 
           if (payload.type === "status" && payload.message) {
             setStatusMessage(payload.message);
@@ -379,54 +455,108 @@ export function ChatApp() {
               ),
             );
           }
-          if (payload.type === "final" && payload.response) {
-            finalResponse = payload.response;
-          }
-          if (payload.type === "error") {
-            throw new Error(payload.error || "Request failed");
-          }
         }
       }
 
-      if (requestGen !== requestGenRef.current) return;
+      if (!isCurrentRequest()) return;
 
       if (!finalResponse) {
         throw new Error("The agent finished without a final response.");
       }
 
-      setMessages((prev) => [
-        ...prev,
-        {
-          id: crypto.randomUUID(),
-          role: "assistant",
-          content: finalResponse.answer,
-          structured: finalResponse,
-        },
-      ]);
+      const assistantMessage: UiMessage = {
+        id: crypto.randomUUID(),
+        role: "assistant",
+        content: finalResponse.answer,
+        structured: finalResponse,
+      };
+
+      const nextStore = applyAssistantReply({
+        userId,
+        conversationId: targetConversationId,
+        userMessageId: userMessageId!,
+        assistant: assistantMessage,
+      });
+      setConversations(nextStore.conversations);
+
+      if (isActive()) {
+        const active = nextStore.conversations.find(
+          (c) => c.id === targetConversationId,
+        );
+        if (active) setMessages(active.messages);
+      }
     } catch (err) {
-      if (controller.signal.aborted || requestGen !== requestGenRef.current) {
+      if (controller.signal.aborted || !isCurrentRequest()) {
+        // Superseded by a newer same-chat turn: drop pending so refresh won't retry it.
+        if (!isCurrentRequest() && userMessageId) {
+          const nextStore = clearMessagePending(
+            userId,
+            targetConversationId,
+            userMessageId,
+          );
+          setConversations(nextStore.conversations);
+          if (isActive()) {
+            const active = nextStore.conversations.find(
+              (c) => c.id === targetConversationId,
+            );
+            if (active) setMessages(active.messages);
+          }
+        }
         return;
       }
       const text = err instanceof Error ? err.message : "Unexpected error";
-      setError(text);
-      setMessages((prev) => [
-        ...prev,
-        {
-          id: crypto.randomUUID(),
-          role: "assistant",
-          content: "I could not complete that request.",
-          error: text,
-        },
-      ]);
+      const errorMessage: UiMessage = {
+        id: crypto.randomUUID(),
+        role: "assistant",
+        content: "I could not complete that request.",
+        error: text,
+      };
+      const nextStore = applyAssistantReply({
+        userId,
+        conversationId: targetConversationId,
+        userMessageId: userMessageId!,
+        assistant: errorMessage,
+      });
+      setConversations(nextStore.conversations);
+      if (isActive()) {
+        setError(text);
+        const active = nextStore.conversations.find(
+          (c) => c.id === targetConversationId,
+        );
+        if (active) setMessages(active.messages);
+      }
     } finally {
-      if (requestGen === requestGenRef.current) {
-        setLoading(false);
-        setActiveTools([]);
-        setStatusMessage("Understanding question…");
-        inputRef.current?.focus();
+      if (abortByConversationRef.current.get(targetConversationId) === controller) {
+        abortByConversationRef.current.delete(targetConversationId);
+      }
+      if (isCurrentRequest()) {
+        setConversationLoading(targetConversationId, false);
+        if (isActive()) {
+          setActiveTools([]);
+          setStatusMessage("Understanding question…");
+          inputRef.current?.focus();
+        }
       }
     }
   }
+
+  // After hydrate, retry any pending user turns interrupted by refresh.
+  useEffect(() => {
+    if (!hydrated || !clientUserId || resumeStartedRef.current) return;
+    resumeStartedRef.current = true;
+    const store = loadUserStore(clientUserId);
+    const retries = findPendingRetries(store);
+    for (const retry of retries) {
+      if (resumedPendingIds.has(retry.userMessage.id)) continue;
+      resumedPendingIds.add(retry.userMessage.id);
+      void sendMessage(retry.userMessage.content, {
+        conversationId: retry.conversationId,
+        history: retry.history,
+        resumeUserMessageId: retry.userMessage.id,
+      });
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps -- run once after hydrate
+  }, [hydrated, clientUserId]);
 
   function onSubmit(event: FormEvent) {
     event.preventDefault();
