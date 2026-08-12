@@ -82,6 +82,24 @@ body {
   animation-delay: 0.3s;
 }
 
+.status-crossfade {
+  display: inline-block;
+  max-width: 100%;
+  transition:
+    opacity 200ms ease,
+    transform 200ms ease;
+}
+
+.status-crossfade-in {
+  opacity: 1;
+  transform: translateY(0);
+}
+
+.status-crossfade-out {
+  opacity: 0;
+  transform: translateY(3px);
+}
+
 /* Center without translateX so hover styles cannot "jump" the button sideways */
 .scroll-fab {
   left: 0;

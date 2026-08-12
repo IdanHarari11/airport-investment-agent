@@ -453,12 +453,12 @@ export function ChatApp() {
         (tool) => tool.status === "done" || tool.status === "error",
       )
     ) {
-      return "Writing explanation from tool results…";
+      return "Drafting explanation from tool results…";
     }
     return statusMessage;
   }, [loading, activeTools, statusMessage]);
 
-  const isDraftingExplanation = useMemo(() => {
+  const isDrafting = useMemo(() => {
     if (!loading || activeTools.length === 0) return false;
     return activeTools.every(
       (tool) => tool.status === "done" || tool.status === "error",
@@ -659,17 +659,10 @@ export function ChatApp() {
                         <span className="typing-dot h-1.5 w-1.5 shrink-0 rounded-full bg-[var(--accent)]" />
                         <span className="typing-dot h-1.5 w-1.5 shrink-0 rounded-full bg-[var(--accent)]" />
                         <WorkingStatusLine
-                          status={workingStatus}
-                          isDrafting={isDraftingExplanation}
+                          workingStatus={workingStatus}
+                          isDrafting={isDrafting}
                         />
                       </div>
-                      {isDraftingExplanation && (
-                        <p className="mb-3 text-[11px] leading-relaxed text-[var(--muted)]">
-                          Deterministic tools already finished. The pause is the
-                          language model writing the narrative — numbers will
-                          still come from the tool cards.
-                        </p>
-                      )}
                       {activeTools.length > 0 ? (
                         <ul className="space-y-1.5">
                           {activeTools.map((tool) => (
