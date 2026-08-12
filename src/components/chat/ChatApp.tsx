@@ -34,6 +34,7 @@ import { StructuredResults } from "./StructuredResults";
 import { BrandLogo } from "@/components/BrandLogo";
 import { MessageActions } from "./MessageActions";
 import { VoiceControls } from "./VoiceControls";
+import { WorkingStatusLine } from "./WorkingStatusLine";
 
 type UiMessage = StoredUiMessage;
 
@@ -452,10 +453,17 @@ export function ChatApp() {
         (tool) => tool.status === "done" || tool.status === "error",
       )
     ) {
-      return "Drafting explanation from tool results…";
+      return "Writing explanation from tool results…";
     }
     return statusMessage;
   }, [loading, activeTools, statusMessage]);
+
+  const isDraftingExplanation = useMemo(() => {
+    if (!loading || activeTools.length === 0) return false;
+    return activeTools.every(
+      (tool) => tool.status === "done" || tool.status === "error",
+    );
+  }, [loading, activeTools]);
 
   return (
     <div className="flex h-[100dvh] w-full max-w-[100vw] overflow-hidden pt-[var(--safe-top)]">
@@ -650,10 +658,18 @@ export function ChatApp() {
                         <span className="typing-dot h-1.5 w-1.5 shrink-0 rounded-full bg-[var(--accent)]" />
                         <span className="typing-dot h-1.5 w-1.5 shrink-0 rounded-full bg-[var(--accent)]" />
                         <span className="typing-dot h-1.5 w-1.5 shrink-0 rounded-full bg-[var(--accent)]" />
-                        <span className="ml-2 min-w-0 truncate text-xs text-[var(--muted)]">
-                          {workingStatus}
-                        </span>
+                        <WorkingStatusLine
+                          status={workingStatus}
+                          isDrafting={isDraftingExplanation}
+                        />
                       </div>
+                      {isDraftingExplanation && (
+                        <p className="mb-3 text-[11px] leading-relaxed text-[var(--muted)]">
+                          Deterministic tools already finished. The pause is the
+                          language model writing the narrative — numbers will
+                          still come from the tool cards.
+                        </p>
+                      )}
                       {activeTools.length > 0 ? (
                         <ul className="space-y-1.5">
                           {activeTools.map((tool) => (
