@@ -148,4 +148,98 @@ describe("sessionStore pending reply routing", () => {
     ]);
     expect(findPendingRetries(loadUserStore(USER_ID))).toHaveLength(0);
   });
+
+  it("keeps a background reply when another conversation is persisted later", () => {
+    const first = loadUserStore(USER_ID);
+    const conversationA = first.activeConversationId;
+    persistConversationMessages(
+      USER_ID,
+      conversationA,
+      [
+        {
+          id: "u1",
+          role: "user",
+          content: "Compare LAX and SNA",
+          pending: true,
+        },
+      ],
+      { setActive: true },
+    );
+
+    const next = startNewConversation(USER_ID);
+    const conversationB = next.activeConversationId;
+
+    applyAssistantReply({
+      userId: USER_ID,
+      conversationId: conversationA,
+      userMessageId: "u1",
+      assistant: {
+        id: "a1",
+        role: "assistant",
+        content: "LAX is more congested than SNA.",
+      },
+    });
+
+    // Active chat B writes its own transcript — must not clobber A's stored reply.
+    persistConversationMessages(
+      USER_ID,
+      conversationB,
+      [{ id: "uB", role: "user", content: "Hello from B", pending: true }],
+      { setActive: true },
+    );
+
+    const store = loadUserStore(USER_ID);
+    expect(store.activeConversationId).toBe(conversationB);
+    const restoredA = store.conversations.find((c) => c.id === conversationA);
+    expect(restoredA?.messages).toEqual([
+      {
+        id: "u1",
+        role: "user",
+        content: "Compare LAX and SNA",
+      },
+      {
+        id: "a1",
+        role: "assistant",
+        content: "LAX is more congested than SNA.",
+      },
+    ]);
+  });
+
+  it("applyAssistantReply is idempotent once an assistant already follows the user turn", () => {
+    const store = loadUserStore(USER_ID);
+    const conversationId = store.activeConversationId;
+    persistConversationMessages(USER_ID, conversationId, [
+      { id: "u1", role: "user", content: "Q", pending: true },
+    ]);
+
+    applyAssistantReply({
+      userId: USER_ID,
+      conversationId,
+      userMessageId: "u1",
+      assistant: {
+        id: "a1",
+        role: "assistant",
+        content: "First answer",
+      },
+    });
+
+    applyAssistantReply({
+      userId: USER_ID,
+      conversationId,
+      userMessageId: "u1",
+      assistant: {
+        id: "a2",
+        role: "assistant",
+        content: "Duplicate final",
+      },
+    });
+
+    const messages = loadUserStore(USER_ID).conversations.find(
+      (c) => c.id === conversationId,
+    )?.messages;
+    expect(messages).toEqual([
+      { id: "u1", role: "user", content: "Q" },
+      { id: "a1", role: "assistant", content: "First answer" },
+    ]);
+  });
 });

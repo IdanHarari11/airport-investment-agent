@@ -18,7 +18,6 @@ import {
   getActiveConversation,
   getOrCreateClientUserId,
   loadUserStore,
-  persistActiveMessages,
   persistConversationMessages,
   resetClientUserIdentity,
   setPreferredLanguage,
@@ -26,6 +25,7 @@ import {
   switchConversation,
   type StoredConversation,
   type StoredUiMessage,
+  type UserSessionStore,
 } from "@/lib/chat/sessionStore";
 import {
   detectLanguage,
@@ -212,15 +212,24 @@ export function ChatApp() {
     [clientUserId],
   );
 
-  useEffect(() => {
-    if (!hydrated || !clientUserId || !conversationId) return;
-    const store = persistActiveMessages(
-      clientUserId,
-      conversationId,
-      messages,
-    );
+  /**
+   * Sync React message state from a store write for `targetId` only when that
+   * chat is still on screen. Functional update re-checks the ref at flush time
+   * so a switch that lands between "write LS" and "setState" cannot paint the
+   * wrong transcript (and we no longer mirror messages→LS via an effect that
+   * could clobber a background applyAssistantReply).
+   */
+  function syncMessagesIfViewing(
+    store: UserSessionStore,
+    targetId: string,
+  ) {
     setConversations(store.conversations);
-  }, [messages, hydrated, clientUserId, conversationId]);
+    setMessages((prev) => {
+      if (conversationIdRef.current !== targetId) return prev;
+      const active = store.conversations.find((c) => c.id === targetId);
+      return active ? active.messages : prev;
+    });
+  }
 
   const scrollToBottom = useCallback((behavior: ScrollBehavior = "smooth") => {
     bottomRef.current?.scrollIntoView({ behavior, block: "end" });
@@ -416,7 +425,19 @@ export function ChatApp() {
       .map(({ role, content }) => ({ role, content }))
       .slice(-40);
 
-    setMessages(truncated);
+    // Persist truncated transcript for this chat before the follow-up send
+    // (no messages→LS effect — avoid races with background completions).
+    if (clientUserId && conversationId) {
+      const nextStore = persistConversationMessages(
+        clientUserId,
+        conversationId,
+        truncated,
+        { setActive: true },
+      );
+      syncMessagesIfViewing(nextStore, conversationId);
+    } else {
+      setMessages(truncated);
+    }
     setError(null);
     setActiveTools([]);
     void sendMessage(userContent, { history, seedMessages: truncated });
@@ -478,7 +499,7 @@ export function ChatApp() {
       };
       userMessageId = userMessage.id;
 
-      // Persist immediately so a refresh before the React effect still keeps pending.
+      // Persist to this conversation's store first (survives switch/refresh).
       const nextMessages = [...baseMessages, userMessage];
       const nextStore = persistConversationMessages(
         userId,
@@ -486,10 +507,7 @@ export function ChatApp() {
         nextMessages,
         { setActive: isActive() },
       );
-      setConversations(nextStore.conversations);
-      if (isActive()) {
-        setMessages(nextMessages);
-      }
+      syncMessagesIfViewing(nextStore, targetConversationId);
     }
 
     const detected = detectLanguage(message, preferredLanguage);
@@ -531,6 +549,26 @@ export function ChatApp() {
       const decoder = new TextDecoder();
       let buffer = "";
       let finalResponse: AgentResponse | null = null;
+      let persistedFinal = false;
+
+      const persistFinalToConversation = (response: AgentResponse) => {
+        if (!userMessageId || !isCurrentRequest()) return;
+        const assistantMessage: UiMessage = {
+          id: crypto.randomUUID(),
+          role: "assistant",
+          content: response.answer,
+          structured: response,
+        };
+        // Write this conversation's localStorage first; UI only if still viewing it.
+        const nextStore = applyAssistantReply({
+          userId,
+          conversationId: targetConversationId,
+          userMessageId,
+          assistant: assistantMessage,
+        });
+        syncMessagesIfViewing(nextStore, targetConversationId);
+        persistedFinal = true;
+      };
 
       while (true) {
         const { done, value } = await reader.read();
@@ -560,11 +598,16 @@ export function ChatApp() {
             continue;
           }
 
-          if (payload.type === "final" && payload.response) {
-            finalResponse = payload.response;
-          }
           if (payload.type === "error") {
             throw new Error(payload.error || "Request failed");
+          }
+
+          // Persist as soon as final arrives — do not wait for stream close,
+          // and do not require the chat to still be the active UI tab.
+          if (payload.type === "final" && payload.response) {
+            finalResponse = payload.response;
+            persistFinalToConversation(payload.response);
+            continue;
           }
 
           if (!isActive() || !isCurrentRequest()) continue;
@@ -612,26 +655,9 @@ export function ChatApp() {
         throw new Error("The agent finished without a final response.");
       }
 
-      const assistantMessage: UiMessage = {
-        id: crypto.randomUUID(),
-        role: "assistant",
-        content: finalResponse.answer,
-        structured: finalResponse,
-      };
-
-      const nextStore = applyAssistantReply({
-        userId,
-        conversationId: targetConversationId,
-        userMessageId: userMessageId!,
-        assistant: assistantMessage,
-      });
-      setConversations(nextStore.conversations);
-
-      if (isActive()) {
-        const active = nextStore.conversations.find(
-          (c) => c.id === targetConversationId,
-        );
-        if (active) setMessages(active.messages);
+      // Stream ended without an in-loop persist (should be rare); ensure LS has it.
+      if (!persistedFinal) {
+        persistFinalToConversation(finalResponse);
       }
     } catch (err) {
       if (controller.signal.aborted || !isCurrentRequest()) {
@@ -642,13 +668,7 @@ export function ChatApp() {
             targetConversationId,
             userMessageId,
           );
-          setConversations(nextStore.conversations);
-          if (isActive()) {
-            const active = nextStore.conversations.find(
-              (c) => c.id === targetConversationId,
-            );
-            if (active) setMessages(active.messages);
-          }
+          syncMessagesIfViewing(nextStore, targetConversationId);
         }
         return;
       }
@@ -675,13 +695,9 @@ export function ChatApp() {
         userMessageId: userMessageId!,
         assistant: errorMessage,
       });
-      setConversations(nextStore.conversations);
+      syncMessagesIfViewing(nextStore, targetConversationId);
       if (isActive()) {
         setError(text);
-        const active = nextStore.conversations.find(
-          (c) => c.id === targetConversationId,
-        );
-        if (active) setMessages(active.messages);
       }
     } finally {
       if (abortByConversationRef.current.get(targetConversationId) === controller) {
