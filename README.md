@@ -1,41 +1,18 @@
 # Airport Investment Intelligence Agent
 
-AI-assisted analyst tool for screening U.S. airports where terminal/capacity expansion may be attractive.
+FDE take-home (Deloitte Digital): AI-assisted analyst tool for screening U.S. airports where terminal/capacity expansion may be attractive.
 
 The LLM explains findings and selects tools. **All scores, rankings, congestion indices, long-haul shares, and unmet-demand proxies are computed in deterministic TypeScript** from cached public FAA/BTS data.
 
+**Deliverables:** source code (this repo) · design doc → [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md) (scoring methodology · key tradeoffs · where/how AI is used).
+
 ## What it does
 
-- Chat naturally about airport expansion opportunity
-- Rank airports in a region (e.g. New England)
-- Compare airports (e.g. LAX vs SNA, BOS vs JFK)
-- Report congestion signals from BTS on-time data
-- Report long-haul departure share with an explicit distance threshold
-- Provide an **Estimated Unmet Demand Proxy** (clearly labeled as a proxy)
-- Preserve conversational follow-ups across turns in the same chat
-
-## Architecture overview
-
-```text
-Public government sources
-       ↓
-Data Providers (ArcGIS REST + BTS download ingest)
-       ↓
-Normalized aviation model → local cache
-       ↓
-Deterministic analytics / scoring
-       ↓
-LangChain tools → Agent → Next.js UI
-```
-
-## Deliverables
-
-| Deliverable | Location |
-|---|---|
-| Source code | this repository |
-| Design / architecture doc (scoring · tradeoffs · where AI is used) | [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md) |
-
-See also the scoring summary and assumptions below for a short interview-ready overview.
+- Chat about airport expansion opportunity with conversational follow-ups
+- Rank / compare airports with a defined Expansion Opportunity Score
+- Congestion, long-haul share (≥1500 miles), and an **Estimated Unmet Demand Proxy**
+- Surfaces assumptions, data periods, sources, and confidence in the UI
+- Voice bonus: mic (browser STT) + English TTS (ElevenLabs)
 
 ## How to run locally
 
@@ -66,17 +43,17 @@ LangSmith and ElevenLabs are optional. Chat runs with only `OPENAI_API_KEY`; spe
 
 ## Chat sessions
 
-Sessions are **private and browser-local** (anonymous `clientUserId` in `localStorage`). Conversations are stored under `airport-agent:v1:store:{userId}` on that device.
+Sessions are **private and browser-local** — there is **no account system** and **no server-side job queue**. Conversations live under `airport-agent:v1:store:{userId}` in `localStorage` on that device.
 
-- Each `/api/chat` request sends history from the client (last 40 turns). The server handles the turn and returns SSE; the browser owns the transcript.
-- User turns are marked `pending` and persisted; on `final`, the assistant reply is written into the conversation that started the request (`applyAssistantReply`), including after chat switches.
+- Each `/api/chat` request sends history from the client (last 40 turns). The UI uses SSE (`status` / tools → `structured` cards → `answer_delta` → `final`); the browser owns the transcript.
+- User turns are marked `pending` and persisted. Streaming UI updates stay in memory; only `final` writes the assistant reply into the conversation that started the request (`applyAssistantReply`), including after chat switches.
 - Switching chats or **New chat** leaves other in-flight requests running. Only a newer send in the **same** conversation supersedes the previous turn.
-- After a refresh, pending user turns are rediscovered and retried (`findPendingRetries`). Cancelled unload fetches are not saved as fake assistant failures (`isUnloadNetworkError`).
+- Refresh does **not** resume an SSE stream. Pending turns are rediscovered and **retried** after hydrate (`findPendingRetries`). Cancelled unload fetches are not saved as fake assistant failures (`isUnloadNetworkError`).
 - Desktop: sidebar history. Mobile (`xl` and below): drawer for history / New chat / Reset. In-flight rows show a pulse while loading or still `pending`.
 - **Reset local user** mints a new anonymous identity.
 - Header: **Private local session · scores deterministic**.
 
-Closing the tab ends client-side processing for that browser session (exam scope: client store, not multi-device sync).
+Closing the tab stops client processing; the server does not continue a background job for you.
 
 ## Data sources (public government HTTP)
 
@@ -106,7 +83,7 @@ npm run refresh:apis -- --force
 python3 -m venv .venv
 source .venv/bin/activate
 pip install openpyxl requests beautifulsoup4 lxml
-npm run ingest   # → data/normalized/dataset.json
+npm run ingest   # → data/normalized/dataset.json (only runtime aviation file)
 ```
 
 The UI Assumptions & sources panel shows which REST/download path was actually used and the data period.
@@ -130,14 +107,16 @@ ELEVENLABS_API_KEY=...
 
 ## Example questions
 
+Aligned with the FDE exam brief (plus useful follow-ups):
+
 - Which airports in New England are strong candidates for terminal expansion?
-- Compare LAX and SNA congestion levels.
-- What percentage of long-haul flights depart from ANC?
-- What is the estimated unmet flight demand at SFO and why?
+- Compare LA and Santa Ana airport congestion levels.
+- What is the percentage of long haul flights out of Anchorage airport?
+- What is the unmet flight demand in SFO airport and why?
 - Compare BOS and JFK.
 - Why did airport A rank higher than airport B?
-- Show me the metrics behind that score.
 - What assumptions are you making?
+- Until when is your aviation data current?
 
 ## Scoring methodology summary
 
@@ -165,12 +144,12 @@ Regional ranking screens also apply a default **minimum 250,000 CY2024 enplaneme
 
 ## Working status (UI)
 
-While tools run, the Working card shows live tool rows. After tools finish and the model is drafting, `WorkingStatusLine` rotates short tips and **stops on the last tip**: *Almost ready — polishing the investment framing…*
+While tools run, the Working card shows live tool rows. After tools finish and before answer tokens stream, `WorkingStatusLine` rotates short tips and **stops on the last tip**: *Almost ready — polishing the investment framing…*
 
 ## Scope notes
 
 - Screening heuristic for analysts (decision support), with fixed scoring weights
-- Monthly operational extracts can be seasonally skewed; T-100 is domestic U.S. carrier segment data
+- Multi-month OTP/T-100 windows reduce single-month seasonality but still reflect publication lag; T-100 is domestic U.S. carrier segment data
 - Some small airports lack OTP coverage (`onTime: null`)
 
 ## Testing
@@ -198,15 +177,15 @@ This runs one ANC long-haul turn, prints tool vs LLM timings, and lists recent L
 ## Project layout
 
 ```text
-src/app/                 Next.js UI + /api/chat
-src/components/chat/     Chat UI (incl. WorkingStatusLine, mobile drawer)
-src/lib/chat/            localStorage session store + unload-error helpers
-src/lib/agent/           LangChain tools, agent, prompts, model token budget
+src/app/                 Next.js UI + /api/chat (+ /api/tts)
+src/components/chat/     Chat UI
+src/lib/chat/            localStorage session store
+src/lib/agent/           LangChain tools, agent, prompts
 src/lib/aviation/        Data provider + types + regions
-src/lib/analytics/       Congestion, long-haul, unmet-demand, normalization
+src/lib/analytics/       Congestion, long-haul, unmet-demand
 src/lib/scoring/         Deterministic score + rank
-data/normalized/         Cached public dataset
+data/normalized/         dataset.json (committed public-data snapshot)
+docs/ARCHITECTURE.md     Exam design doc (scoring · tradeoffs · AI usage)
+scripts/ingest_bts.py    Re-ingest from FAA/BTS
 tests/                   Vitest coverage
-docs/ARCHITECTURE.md     Interview-friendly design notes
-scripts/ingest_bts.py    Optional re-ingest from FAA/BTS
 ```

@@ -1,21 +1,22 @@
 "use client";
 
+/** First four match the FDE exam sample questions; extras cover follow-ups / scoping. */
 const EXAMPLES = [
   {
     short: "New England ranking",
     full: "Which airports in New England are strong candidates for terminal expansion?",
   },
   {
-    short: "LAX vs SNA congestion",
-    full: "Compare LAX and SNA congestion levels.",
+    short: "LA vs Santa Ana congestion",
+    full: "Compare LA and Santa Ana airport congestion levels.",
   },
   {
-    short: "ANC long-haul %",
-    full: "What percentage of long-haul flights depart from ANC?",
+    short: "Anchorage long-haul %",
+    full: "What is the percentage of long haul flights out of Anchorage airport?",
   },
   {
     short: "SFO unmet demand",
-    full: "What is the estimated unmet flight demand at SFO and why?",
+    full: "What is the unmet flight demand in SFO airport and why?",
   },
   {
     short: "BOS vs JFK",
