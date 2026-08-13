@@ -85,6 +85,44 @@ function SendIcon() {
   );
 }
 
+function MenuIcon() {
+  return (
+    <svg
+      viewBox="0 0 24 24"
+      className="h-5 w-5"
+      fill="none"
+      stroke="currentColor"
+      strokeWidth="2"
+      aria-hidden="true"
+    >
+      <path
+        strokeLinecap="round"
+        strokeLinejoin="round"
+        d="M4 7h16M4 12h16M4 17h16"
+      />
+    </svg>
+  );
+}
+
+function CloseIcon() {
+  return (
+    <svg
+      viewBox="0 0 24 24"
+      className="h-5 w-5"
+      fill="none"
+      stroke="currentColor"
+      strokeWidth="2"
+      aria-hidden="true"
+    >
+      <path
+        strokeLinecap="round"
+        strokeLinejoin="round"
+        d="M6 6l12 12M18 6L6 18"
+      />
+    </svg>
+  );
+}
+
 export function ChatApp() {
   const [hydrated, setHydrated] = useState(false);
   const [clientUserId, setClientUserId] = useState<string>("");
@@ -100,6 +138,11 @@ export function ChatApp() {
   const [stickToBottom, setStickToBottom] = useState(true);
   const [statusMessage, setStatusMessage] = useState("Understanding question…");
   const [activeTools, setActiveTools] = useState<ToolRun[]>([]);
+  const [mobileNavOpen, setMobileNavOpen] = useState(false);
+  /** Mirror of loadingConversationsRef for list UI re-renders. */
+  const [inFlightConversationIds, setInFlightConversationIds] = useState<
+    Set<string>
+  >(() => new Set());
 
   const scrollRef = useRef<HTMLDivElement | null>(null);
   const bottomRef = useRef<HTMLDivElement | null>(null);
@@ -122,6 +165,8 @@ export function ChatApp() {
     const userId = getOrCreateClientUserId();
     const store = loadUserStore(userId);
     const active = getActiveConversation(store);
+    // Sync ref immediately so in-flight SSE cannot race against stale id.
+    conversationIdRef.current = active.id;
     setClientUserId(userId);
     setConversationId(active.id);
     setConversations(store.conversations);
@@ -132,6 +177,15 @@ export function ChatApp() {
     );
     setHydrated(true);
   }, []);
+
+  useEffect(() => {
+    if (!mobileNavOpen) return;
+    const onKeyDown = (event: globalThis.KeyboardEvent) => {
+      if (event.key === "Escape") setMobileNavOpen(false);
+    };
+    window.addEventListener("keydown", onKeyDown);
+    return () => window.removeEventListener("keydown", onKeyDown);
+  }, [mobileNavOpen]);
 
   const rememberLanguage = useCallback(
     (bcp47: string) => {
@@ -195,6 +249,7 @@ export function ChatApp() {
   function setConversationLoading(targetId: string, value: boolean) {
     if (value) loadingConversationsRef.current.add(targetId);
     else loadingConversationsRef.current.delete(targetId);
+    setInFlightConversationIds(new Set(loadingConversationsRef.current));
     if (conversationIdRef.current === targetId) {
       setLoading(value);
     }
@@ -204,6 +259,7 @@ export function ChatApp() {
     if (!clientUserId) return;
     const store = startNewConversation(clientUserId);
     const active = getActiveConversation(store);
+    conversationIdRef.current = active.id;
     setConversationId(active.id);
     setConversations(store.conversations);
     setMessages([]);
@@ -211,18 +267,24 @@ export function ChatApp() {
     setLoading(loadingConversationsRef.current.has(active.id));
     setActiveTools([]);
     setShowScrollButton(false);
+    setMobileNavOpen(false);
   }
 
   function openConversation(id: string) {
-    if (!clientUserId || id === conversationId) return;
+    if (!clientUserId || id === conversationId) {
+      setMobileNavOpen(false);
+      return;
+    }
     const store = switchConversation(clientUserId, id);
     const active = getActiveConversation(store);
+    conversationIdRef.current = active.id;
     setConversationId(active.id);
     setConversations(store.conversations);
     setMessages(active.messages);
     setError(null);
     setLoading(loadingConversationsRef.current.has(active.id));
     setActiveTools([]);
+    setMobileNavOpen(false);
   }
 
   function resetLocalIdentity() {
@@ -232,11 +294,13 @@ export function ChatApp() {
     abortByConversationRef.current.clear();
     requestGenByConversationRef.current.clear();
     loadingConversationsRef.current.clear();
+    setInFlightConversationIds(new Set());
     resumeStartedRef.current = false;
     resumedPendingIds.clear();
     const userId = resetClientUserIdentity();
     const store = loadUserStore(userId);
     const active = getActiveConversation(store);
+    conversationIdRef.current = active.id;
     setClientUserId(userId);
     setConversationId(active.id);
     setConversations(store.conversations);
@@ -244,6 +308,75 @@ export function ChatApp() {
     setError(null);
     setLoading(false);
     setActiveTools([]);
+    setMobileNavOpen(false);
+  }
+
+  function isConversationInFlight(conversation: StoredConversation) {
+    return (
+      inFlightConversationIds.has(conversation.id) ||
+      conversation.messages.some((message) => message.pending)
+    );
+  }
+
+  const hasSavedChats = useMemo(
+    () => conversations.some((c) => c.messages.length > 0),
+    [conversations],
+  );
+
+  const visibleConversations = useMemo(
+    () =>
+      conversations
+        .filter((c) => c.messages.length > 0 || c.id === conversationId)
+        .slice(0, 12),
+    [conversations, conversationId],
+  );
+
+  function renderConversationList(options?: { dense?: boolean }) {
+    if (!hasSavedChats) return null;
+    const dense = options?.dense ?? false;
+    return (
+      <div
+        className={
+          dense
+            ? "min-h-0 flex-1 overflow-y-auto pr-1"
+            : "mb-4 min-h-0 max-h-40 overflow-y-auto pr-1"
+        }
+      >
+        <p className="mb-1.5 text-[10px] uppercase tracking-[0.14em] text-[var(--muted)]">
+          Your chats
+        </p>
+        <ul className="space-y-1">
+          {visibleConversations.map((conversation) => {
+            const inFlight = isConversationInFlight(conversation);
+            const isActiveChat = conversation.id === conversationId;
+            return (
+              <li key={conversation.id}>
+                <button
+                  type="button"
+                  onClick={() => openConversation(conversation.id)}
+                  className={`flex w-full items-center gap-2 truncate rounded-lg px-2 py-1.5 text-left text-xs transition ${
+                    isActiveChat
+                      ? "bg-[var(--accent-soft)] text-[var(--accent)]"
+                      : "text-[var(--muted)] hover:bg-[var(--bg)]/50 hover:text-[var(--text)]"
+                  }`}
+                >
+                  <span className="min-w-0 flex-1 truncate">
+                    {conversation.title}
+                  </span>
+                  {inFlight && (
+                    <span
+                      className="h-1.5 w-1.5 shrink-0 animate-pulse rounded-full bg-[var(--accent)]"
+                      title="Reply in progress"
+                      aria-label="Reply in progress"
+                    />
+                  )}
+                </button>
+              </li>
+            );
+          })}
+        </ul>
+      </div>
+    );
   }
 
   function regenerateAssistant(assistantId: string) {
@@ -633,33 +766,7 @@ export function ChatApp() {
             Reset local user
           </button>
         </div>
-        {conversations.some((c) => c.messages.length > 0) && (
-          <div className="mb-4 min-h-0 max-h-40 overflow-y-auto pr-1">
-            <p className="mb-1.5 text-[10px] uppercase tracking-[0.14em] text-[var(--muted)]">
-              Your chats
-            </p>
-            <ul className="space-y-1">
-              {conversations
-                .filter((c) => c.messages.length > 0 || c.id === conversationId)
-                .slice(0, 12)
-                .map((conversation) => (
-                  <li key={conversation.id}>
-                    <button
-                      type="button"
-                      onClick={() => openConversation(conversation.id)}
-                      className={`w-full truncate rounded-lg px-2 py-1.5 text-left text-xs transition ${
-                        conversation.id === conversationId
-                          ? "bg-[var(--accent-soft)] text-[var(--accent)]"
-                          : "text-[var(--muted)] hover:bg-[var(--bg)]/50 hover:text-[var(--text)]"
-                      }`}
-                    >
-                      {conversation.title}
-                    </button>
-                  </li>
-                ))}
-            </ul>
-          </div>
-        )}
+        {renderConversationList()}
         <div className="min-h-0 flex-1 overflow-y-auto pr-1">
           <ExampleQuestions
             disabled={!hydrated}
@@ -668,9 +775,75 @@ export function ChatApp() {
         </div>
       </aside>
 
+      {mobileNavOpen && (
+        <div className="fixed inset-0 z-40 xl:hidden" role="dialog" aria-modal="true" aria-label="Chat menu">
+          <button
+            type="button"
+            className="absolute inset-0 bg-black/55 backdrop-blur-[2px]"
+            aria-label="Close chat menu"
+            onClick={() => setMobileNavOpen(false)}
+          />
+          <aside className="absolute inset-y-0 left-0 flex w-[min(100vw-2.5rem,300px)] max-w-full flex-col border-r border-[var(--border)] bg-[var(--bg-panel)] p-4 shadow-2xl pt-[calc(1rem+var(--safe-top))] pb-[calc(1rem+var(--safe-bottom))]">
+            <div className="mb-4 flex items-start justify-between gap-3">
+              <div className="flex min-w-0 items-center gap-3">
+                <BrandLogo size={40} priority />
+                <div className="min-w-0">
+                  <p className="text-[11px] uppercase tracking-[0.16em] text-[var(--accent)]">
+                    Airport Intelligence
+                  </p>
+                  <h2 className="truncate text-lg font-semibold tracking-tight">
+                    Expansion Agent
+                  </h2>
+                </div>
+              </div>
+              <button
+                type="button"
+                onClick={() => setMobileNavOpen(false)}
+                className="shrink-0 rounded-lg border border-[var(--border)] p-2 text-[var(--muted)] transition hover:border-[var(--border-strong)] hover:text-[var(--text)]"
+                aria-label="Close menu"
+              >
+                <CloseIcon />
+              </button>
+            </div>
+            <div className="mb-4 flex items-center justify-between gap-2">
+              <button
+                type="button"
+                onClick={beginNewChat}
+                disabled={!hydrated}
+                className="rounded-full border border-[var(--border)] px-3 py-1.5 text-xs text-[var(--muted)] transition hover:border-[var(--border-strong)] hover:text-[var(--text)] disabled:opacity-40"
+              >
+                New chat
+              </button>
+              <button
+                type="button"
+                onClick={resetLocalIdentity}
+                className="text-[10px] text-[var(--muted)] underline-offset-2 hover:text-[var(--text)] hover:underline"
+                title="Create a new anonymous local identity (does not share chats)"
+              >
+                Reset local user
+              </button>
+            </div>
+            {renderConversationList({ dense: true })}
+            {!hasSavedChats && (
+              <p className="text-xs text-[var(--muted)]">
+                No saved chats yet. Ask a question to start one.
+              </p>
+            )}
+          </aside>
+        </div>
+      )}
+
       <main className="relative flex min-w-0 flex-1 flex-col overflow-hidden">
         <header className="flex h-14 shrink-0 items-center justify-between gap-3 border-b border-[var(--border)] bg-[var(--bg-panel)]/80 px-3 backdrop-blur sm:px-4 md:h-16 md:px-6">
           <div className="flex min-w-0 items-center gap-2.5 sm:gap-3">
+            <button
+              type="button"
+              onClick={() => setMobileNavOpen(true)}
+              className="shrink-0 rounded-lg border border-[var(--border)] p-2 text-[var(--muted)] transition hover:border-[var(--border-strong)] hover:text-[var(--text)] xl:hidden"
+              aria-label="Open chat history"
+            >
+              <MenuIcon />
+            </button>
             <BrandLogo size={32} className="xl:hidden" priority />
             <div className="min-w-0">
               <p className="truncate text-sm font-medium md:text-base">
