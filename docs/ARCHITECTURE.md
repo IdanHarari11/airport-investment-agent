@@ -42,26 +42,26 @@ Agent → Next.js UI
 ### Runtime flow
 
 1. User asks a question in the chat UI (`ChatApp`).
-2. The client marks the user turn `pending`, persists it under that conversation in `localStorage`, and POSTs to `/api/chat` with history (≤40) + optional anonymous `clientUserId`.
-3. `/api/chat` applies a small in-memory rate limit, then invokes a LangChain tool-calling agent (SSE: status / tool_start / tool_end / final).
-4. The agent selects tools (`rankAirports`, `compareAirports`, `getCongestionMetrics`, `getLongHaulStats`, `estimateUnmetDemand`, etc.).
-5. Scoring tools call TypeScript domain functions over the hydrated aviation provider (public REST caches + OTP ingest).
-6. The agent synthesizes a structured response; server-side code overwrites `airports[]` / insight cards from tool JSON when tools ran (rank/compare take precedence over `getAirportMetrics`), injects default assumptions/sources when needed, dedupes sources, and sets deterministic confidence (including medium for proxy/insight-only answers).
-7. On `final`, the client writes the assistant reply into **that conversation’s** store (`applyAssistantReply`) even if the user has switched chats. Assumptions & sources open by default.
+2. The client marks the user turn `pending`, persists it under that conversation in `localStorage`, and POSTs to `/api/chat` with history (≤40) + optional anonymous `clientUserId` (`Accept: text/event-stream`).
+3. `/api/chat` rate-limits, then runs `streamAirportAgent` over SSE: `status` / `tool_start` / `tool_end` → `structured` (cards from tool JSON) → `answer_delta` → `final` (complete `AgentResponse`). Non-SSE clients still get JSON `{ response }` from `runAirportAgent`.
+4. Scoring tools call TypeScript domain functions over the hydrated aviation provider. Rank/compare take precedence over `getAirportMetrics` when merging cards; sources are deduped; confidence is set deterministically (medium for proxy/insight-only answers).
+5. The active chat may paint streaming UI (`structured` + `answer_delta`) in memory only. On `final`, the client writes the complete assistant reply into **that conversation’s** store (`applyAssistantReply`) even after a chat switch — partial stream never touches `localStorage`. Assumptions & sources open by default.
 
-### Client sessions
+### Client sessions (not server jobs)
 
-- **Storage:** anonymous `clientUserId` + per-user conversation map in `localStorage` (`src/lib/chat/sessionStore.ts`).
-- **Concurrency:** AbortControllers keyed by `conversationId`; chat switch leaves other in-flight requests running.
-- **UI:** desktop sidebar + mobile drawer; Working card shows tool progress while the model drafts.
-- Closing the tab ends client-side work for that browser session (private local store; exam scope).
+- **Storage:** anonymous `clientUserId` + per-user conversation map in `localStorage` (`src/lib/chat/sessionStore.ts`). Cap: 25 conversations, 200 messages each.
+- **Concurrency:** AbortControllers / request generations keyed by `conversationId`. New chat / switch updates `conversationIdRef` immediately and does **not** abort other conversations. Only a newer send in the **same** chat supersedes the previous turn.
+- **Refresh:** not mid-stream resume. Pending turns without an assistant reply are rediscovered after hydrate (`findPendingRetries`) and re-sent as a new `/api/chat` request. Unload-time fetch cancellations stay `pending` (`isUnloadNetworkError`) — no fake “network error” assistant message.
+- **UI:** desktop sidebar + mobile drawer for history / New chat / Reset; in-flight pulse while loading or still `pending`. After tools finish (before answer deltas), `WorkingStatusLine` rotates drafting tips and stops on the last line (*Almost ready — polishing the investment framing…*).
+- **Limits:** no durable server job queue. Closing the tab ends client-side work; “private local session” means this browser store, not multi-device sync.
 
 ### Security & isolation
 
 - API keys (`OPENAI_*`, `ELEVENLABS_*`) live only in server env / Route Handlers. No `NEXT_PUBLIC_` secrets.
 - Client errors are sanitized (`toPublicErrorMessage`).
 - Basic in-memory rate limits protect `/api/chat` and `/api/tts`.
-- Completion budget: `OPENAI_MAX_TOKENS` defaults to **16384** (floor **4096**) so structured JSON can finish.
+- History is on the wire per request; the browser owns persistence under `airport-agent:v1:store:{userId}`.
+- Completion budget: `OPENAI_MAX_TOKENS` defaults to **16384**; values below **4096** are ignored so structured JSON can finish (`resolveMaxCompletionTokens`).
 - `.env` is gitignored.
 
 Orchestration uses LangChain `createAgent` (standard tool-calling agent).
@@ -157,8 +157,8 @@ OTP uses the download → ingest → normalized cache path because TranStats fli
 | Cached official extracts for scores | Live TranStats on every chat | Reliability + latency for demo |
 | Explainable proxy score | Complex econometric model | Interview clarity, testability |
 | LangChain `createAgent` | Custom LangGraph workflow | Sufficient orchestration, less ceremony |
-| Client `localStorage` sessions + pending retry | Server-side chat jobs / stream resume | Private per-browser sessions; refresh retries the turn |
-| Default `maxTokens` 16384 (floor 4096) | Aggressive low caps for latency | Structured `AgentResponse` JSON must finish |
+| Client `localStorage` sessions + pending retry | Server-side chat jobs / stream resume | Private per-browser sessions; refresh retries a full turn (does not resume SSE) |
+| Default `maxTokens` 16384 (ignore below 4096) | Aggressive low caps for latency | Structured `AgentResponse` JSON must finish |
 | Long-haul ≥ 1500 miles | Ask LLM per flight | Deterministic, documented |
 | Unmet-demand proxy | Treat as official unmet demand | Honesty about what the public data supports |
 
