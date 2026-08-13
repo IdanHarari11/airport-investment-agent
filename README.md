@@ -178,9 +178,9 @@ This runs one ANC long-haul turn, prints tool vs LLM timings, and lists recent L
 
 ```text
 src/app/                 Next.js UI + /api/chat (+ /api/tts)
-src/components/chat/     Chat UI
-src/lib/chat/            localStorage session store
-src/lib/agent/           LangChain tools, agent, prompts
+src/components/chat/     Chat UI (WorkingStatusLine, mobile drawer)
+src/lib/chat/            localStorage session store + unload-error helpers
+src/lib/agent/           LangChain tools, agent, prompts, model token budget
 src/lib/aviation/        Data provider + types + regions
 src/lib/analytics/       Congestion, long-haul, unmet-demand
 src/lib/scoring/         Deterministic score + rank
