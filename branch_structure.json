@@ -1,0 +1,24 @@
+{
+  "default_branch": "main",
+  "branches": [
+    "feature/answer-ui-streaming",
+    "feature/follow-ups",
+    "feature/guarantee-follow-ups",
+    "main",
+    "origin"
+  ],
+  "parent": {
+    "feature/answer-ui-streaming": "main",
+    "feature/follow-ups": "main",
+    "feature/guarantee-follow-ups": "main",
+    "main": null,
+    "origin": "main"
+  },
+  "order": [
+    "main",
+    "feature/answer-ui-streaming",
+    "feature/follow-ups",
+    "feature/guarantee-follow-ups",
+    "origin"
+  ]
+}
