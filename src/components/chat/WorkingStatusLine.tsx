@@ -31,15 +31,36 @@ export function WorkingStatusLine({ workingStatus, isDrafting }: Props) {
       return;
     }
 
+    // Fresh drafting session: always start from the first tip.
+    setTipIndex(0);
+    setVisible(true);
+
+    let tip = 0;
+    let fadeTimeoutId: number | undefined;
+
     const intervalId = window.setInterval(() => {
+      if (tip >= DRAFTING_TIPS.length - 1) {
+        window.clearInterval(intervalId);
+        return;
+      }
+
       setVisible(false);
-      window.setTimeout(() => {
-        setTipIndex((prev) => (prev + 1) % DRAFTING_TIPS.length);
+      fadeTimeoutId = window.setTimeout(() => {
+        tip += 1;
+        setTipIndex(tip);
         setVisible(true);
+        if (tip >= DRAFTING_TIPS.length - 1) {
+          window.clearInterval(intervalId);
+        }
       }, 220);
     }, 2800);
 
-    return () => window.clearInterval(intervalId);
+    return () => {
+      window.clearInterval(intervalId);
+      if (fadeTimeoutId !== undefined) {
+        window.clearTimeout(fadeTimeoutId);
+      }
+    };
   }, [isDrafting]);
 
   const text = isDrafting ? DRAFTING_TIPS[tipIndex] : workingStatus;
