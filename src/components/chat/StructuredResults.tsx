@@ -303,7 +303,13 @@ export function StructuredResults({ data }: { data: AgentResponse }) {
             className="flex w-full items-center justify-between gap-2 px-3 py-2 text-start text-xs font-medium text-[var(--muted)] transition hover:text-[var(--text)]"
           >
             <span className="min-w-0">
-              Assumptions & sources ({assumptions.length} · {sources.length})
+              {assumptions.length > 0 && sources.length > 0
+                ? `${assumptions.length} assumptions · ${sources.length} sources`
+                : assumptions.length > 0
+                  ? `${assumptions.length} assumptions`
+                  : sources.length > 0
+                    ? `${sources.length} sources`
+                    : "Assumptions & data sources"}
             </span>
             <span className="shrink-0">{openAssumptions ? "▾" : "▸"}</span>
           </button>

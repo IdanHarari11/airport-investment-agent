@@ -91,7 +91,8 @@ export function scoreAirport(input: ScoreAirportInput): AirportScore {
     "Capacity/demand pressure uses load factor only; passenger growth is a separate component.",
     "Weights are fixed configuration values and are not set by the LLM.",
     "Missing component values are excluded and remaining weights are renormalized.",
-    "OTP/T-100 operational metrics use the monthly extract period recorded on each airport; enplanements are CY2023/CY2024 annual FAA totals.",
+    "OTP/T-100 operational metrics use the extract period recorded on each airport; enplanements are CY2023/CY2024 annual FAA totals.",
+    "Congestion metrics use a multi-month OTP aggregate (see source periods) rather than a single-month snapshot; a production system would typically refresh a trailing 6–12 month rolling window on a schedule.",
   ];
 
   return {

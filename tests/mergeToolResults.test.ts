@@ -1,6 +1,7 @@
 import { describe, expect, it } from "vitest";
 import { AIMessage, HumanMessage, ToolMessage } from "@langchain/core/messages";
 import {
+  dedupeSources,
   enrichAgentResponse,
   mergeAirportsFromToolMessages,
 } from "@/lib/agent/mergeToolResults";
@@ -341,5 +342,47 @@ describe("enrichAgentResponse", () => {
           item.includes("snapshot generated"),
       ),
     ).toBe(true);
+  });
+
+  it("dedupes duplicate FAA enplanement sources from the LLM", () => {
+    const faa = {
+      name: "FAA CY2024 Commercial Service Enplanements",
+      url: "https://www.faa.gov/airports/planning_capacity/passenger_allcargo_stats/passenger",
+      period: "CY2023-CY2024",
+      notes: null,
+    };
+    const enriched = enrichAgentResponse({
+      ...baseResponse(),
+      sources: [faa, faa],
+    });
+    const faaHits = enriched.sources.filter((s) => s.name === faa.name);
+    expect(faaHits).toHaveLength(1);
+  });
+});
+
+describe("dedupeSources", () => {
+  it("keeps the first row per source name", () => {
+    const result = dedupeSources([
+      {
+        name: "FAA CY2024 Commercial Service Enplanements",
+        url: null,
+        period: "CY2023-CY2024",
+        notes: null,
+      },
+      {
+        name: "BTS Airline On-Time Performance (Reporting Carriers)",
+        url: null,
+        period: "2025-01..2026-06",
+        notes: null,
+      },
+      {
+        name: "FAA CY2024 Commercial Service Enplanements",
+        url: "https://example.com",
+        period: "CY2023-CY2024",
+        notes: "dup",
+      },
+    ]);
+    expect(result).toHaveLength(2);
+    expect(result[0]?.url).toBeNull();
   });
 });

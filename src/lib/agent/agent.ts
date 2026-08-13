@@ -148,7 +148,7 @@ function createProgressMiddleware(onProgress?: AgentProgressHandler) {
         // Model still needs a turn after tools to write the analyst answer.
         onProgress?.({
           type: "status",
-          message: "Writing short answer (LLM)…",
+          message: "Drafting explanation from tool results…",
         });
         return result;
       } catch (error) {
@@ -245,7 +245,7 @@ export async function runAirportAgent(params: {
 
   params.onProgress?.({
     type: "status",
-    message: "Writing short answer (LLM)…",
+    message: "Drafting explanation…",
   });
 
   return parseAgentResult(result as {

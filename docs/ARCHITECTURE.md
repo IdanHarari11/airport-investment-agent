@@ -30,23 +30,34 @@ Agent → Next.js UI
 
 ### Runtime flow
 
-1. User asks a question in the chat UI.
-2. `/api/chat` applies a small in-memory rate limit, truncates history to the last 40 turns, then invokes a LangChain tool-calling agent.
-3. The agent selects tools (`rankAirports`, `compareAirports`, `getCongestionMetrics`, `getLongHaulStats`, `estimateUnmetDemand`, etc.).
-4. Scoring tools call TypeScript domain functions over the hydrated aviation provider (public REST caches + OTP ingest).
-5. The agent synthesizes a structured response; server-side code overwrites `airports[]` / insight cards from tool JSON when tools ran (rank/compare take precedence over `getAirportMetrics`), injects default assumptions/sources if empty, and sets deterministic confidence (including honest medium for proxy/insight-only answers).
-6. The UI renders prose plus ranking/comparison cards and tool insight cards (congestion, long-haul share, unmet-demand proxy). Assumptions & sources open by default.
+1. User asks a question in the chat UI (`ChatApp`).
+2. The client marks the user turn `pending`, persists it under that conversation in `localStorage`, and POSTs to `/api/chat` with history (≤40) + optional anonymous `clientUserId`.
+3. `/api/chat` applies a small in-memory rate limit, then invokes a LangChain tool-calling agent (SSE: status / tool_start / tool_end / final).
+4. The agent selects tools (`rankAirports`, `compareAirports`, `getCongestionMetrics`, `getLongHaulStats`, `estimateUnmetDemand`, etc.).
+5. Scoring tools call TypeScript domain functions over the hydrated aviation provider (public REST caches + OTP ingest).
+6. The agent synthesizes a structured response; server-side code overwrites `airports[]` / insight cards from tool JSON when tools ran (rank/compare take precedence over `getAirportMetrics`), injects default assumptions/sources when needed, dedupes sources, and sets deterministic confidence (including medium for proxy/insight-only answers).
+7. On `final`, the client writes the assistant reply into **that conversation’s** store (`applyAssistantReply`) even if the user has switched chats; the Working card updates only for the active conversation. Assumptions & sources open by default.
 
-### Security & session isolation
+### Client sessions
+
+- **Storage:** anonymous `clientUserId` + per-user conversation map in `localStorage` (`src/lib/chat/sessionStore.ts`). Cap: 25 conversations, 200 messages each.
+- **Concurrency:** AbortControllers and request generations are keyed by `conversationId`. Chat switch / New chat updates the active id immediately and leaves other conversations’ in-flight fetches running. Only a newer send in the **same** chat supersedes the previous turn.
+- **Refresh:** pending user turns without an assistant reply are rediscovered after hydrate (`findPendingRetries`) and re-sent. Unload-time fetch cancellations stay `pending` (`isUnloadNetworkError`) so retry can run.
+- **UI:** desktop sidebar + mobile drawer for history / New chat / Reset; list rows show an in-flight pulse when loading or still `pending`. After tools finish, `WorkingStatusLine` rotates drafting tips and stops on the last line (*Almost ready — polishing the investment framing…*).
+- Closing the tab ends client-side work for that browser session (private local store; exam scope).
+
+### Security & isolation
 
 - API keys (`OPENAI_*`, `ELEVENLABS_*`) live only in server env / Route Handlers. No `NEXT_PUBLIC_` secrets.
-- Client errors are sanitized (`toPublicErrorMessage`) — never return raw provider/env messages.
+- Client errors are sanitized (`toPublicErrorMessage`).
 - Basic in-memory rate limits protect `/api/chat` and `/api/tts` on single-instance deploys.
-- The chat API is **stateless**: history is sent by the client per request (client + server keep ≤40 messages). The server does not store or merge conversations across browsers.
-- Each browser gets an anonymous `clientUserId` in `localStorage`. Conversations are stored under `airport-agent:v1:store:{userId}` so users on different browsers/devices never share history. “Reset local user” mints a new identity.
+- Each chat request carries history on the wire; the browser owns persistence under `airport-agent:v1:store:{userId}`.
+- `clientUserId` is accepted for optional future logging; chats stay per-browser.
+- “Reset local user” mints a new anonymous identity.
+- Completion budget: `OPENAI_MAX_TOKENS` defaults to **16384**; values below **4096** are ignored so structured JSON can finish (`resolveMaxCompletionTokens` in `src/lib/agent/model.ts`).
 - `.env` is gitignored.
 
-No LangGraph custom graph was added: standard LangChain `createAgent` is enough for this assignment and easier to explain in an interview.
+Orchestration uses LangChain `createAgent` (standard tool-calling agent).
 
 ## Scoring methodology
 
@@ -66,11 +77,11 @@ Component scores use **percentile ranks within the comparison cohort** (region f
 
 ### Why this model
 
-It is explainable, testable, and aligned to available public fields. It is a screening heuristic for analysts, not a valuation model.
+Explainable, testable, and aligned to available public fields — a screening heuristic for analysts.
 
 ## AI usage
 
-### AI does
+### LLM responsibilities
 
 - Intent understanding
 - Tool selection
@@ -78,18 +89,15 @@ It is explainable, testable, and aligned to available public fields. It is a scr
 - Synthesis of tool JSON into analyst language
 - Explanation of assumptions / uncertainty
 
-### AI does not do
+### Deterministic TypeScript responsibilities
 
-- Calculate official metrics
-- Calculate expansion scores
-- Determine rankings (UI score cards are merged from tool JSON after the model turn)
-- Invent missing values
-- Decide New England membership
-- Decide whether a flight is long-haul
+- Official metrics, expansion scores, and rankings (UI score cards are merged from tool JSON after the model turn)
+- New England membership and long-haul distance threshold
+- Filling missing numeric fields (left as `null` when absent in source data)
 
 ## Data strategy (public government sources)
 
-The assignment asks to **use public APIs to gather airport/aviation data**. Gathering is done **programmatically from public government endpoints**, then normalized and cached. Chat turns do **not** re-hit ArcGIS/TranStats on every message.
+The assignment asks to **use public APIs to gather airport/aviation data**. Gathering is done **programmatically from public government endpoints**, then normalized and cached. Chat turns use the hydrated provider + disk cache.
 
 ### What comes from REST APIs
 
@@ -107,19 +115,17 @@ Refresh: `npm run refresh:apis` (or automatic hydrate when disk cache is missing
 | BTS On-Time Performance | TranStats public download (BTS documents flight-level OTP as download-oriented) via `scripts/ingest_bts.py` | `data/normalized/dataset.json` | Delays, cancellations, congestion (multi-month aggregate: **2025-01..2026-06**) |
 | FAA commercial enplanements + monthly T-100 segment extract | Public HTTPS downloads in the same ingest script | `data/normalized/dataset.json` | Growth/market scale (FAA CY2023–CY2024); seats/load factor/long-haul texture (T-100 aggregate **2025-01..2026-04**) |
 
-OTP stays on the download → ingest → normalized cache path by design (not a workaround): TranStats flight-level On-Time Performance is not exposed as a chat-time REST query API.
+OTP uses the download → ingest → normalized cache path because TranStats flight-level On-Time Performance is exposed as a download-oriented extract for this use case.
 
 ### Why this architecture
 
-- Satisfies the exam requirement to gather data from **public APIs** (ArcGIS REST + official BTS/FAA HTTP).
-- Avoids brittle/slow ArcGIS calls on every chat turn via **provider + TTL disk cache**.
+- Gathers data from **public APIs** (ArcGIS REST + official BTS/FAA HTTP).
+- Uses **provider + TTL disk cache** for reliable demo latency.
 - Keeps scoring **deterministic** and independent of the LLM.
-- No commercial aviation APIs.
-- Live ADS-B overlays were out of scope for exam scoring and are not included.
 
-**Regional ranking filters:** default min CY2024 enplanements (250k) plus exclusion of airports lacking OTP coverage in the loaded monthly extract, so missing congestion does not inflate ranks. New England membership is deterministic in code (`NEW_ENGLAND_STATES`); airport metadata comes from the Facilities provider when available.
+**Regional ranking filters:** default min CY2024 enplanements (250k) plus exclusion of airports lacking OTP coverage in the loaded extract, so ranks stay grounded in available congestion signals. New England membership is deterministic in code (`NEW_ENGLAND_STATES`); airport metadata comes from the Facilities provider when available.
 
-**Long-haul threshold:** ≥ **1500 miles** (documented assumption). The exam does not prescribe a threshold; 1500 is applied deterministically in TypeScript.
+**Long-haul threshold:** ≥ **1500 miles** (documented assumption), applied deterministically in TypeScript.
 
 ### Voice (bonus)
 
@@ -131,23 +137,25 @@ OTP stays on the download → ingest → normalized cache path by design (not a 
 
 | Choice | Alternative | Rationale |
 |---|---|---|
-| Multi-month OTP/T-100 window from 2025-01 | Single latest month only | Full CY2025 coverage + less seasonal noise; end month still table-specific |
+| Multi-month OTP/T-100 window from 2025-01 | Single-month snapshot | Multi-month reduces seasonality within a practical extract size; production would typically refresh a trailing 6–12 month rolling window |
 | Cached official extracts for scores | Live TranStats on every chat | Reliability + latency for demo |
 | Explainable proxy score | Complex econometric model | Interview clarity, testability |
 | LangChain `createAgent` | Custom LangGraph workflow | Sufficient orchestration, less ceremony |
+| Client `localStorage` sessions + pending retry | Server-side chat jobs / stream resume | Private per-browser sessions; refresh retries the turn |
+| Default `maxTokens` 16384 (floor 4096) | Aggressive low caps for latency | Structured `AgentResponse` JSON must finish |
 | Long-haul ≥ 1500 miles | Ask LLM per flight | Deterministic, documented |
-| Unmet-demand proxy | Claim official unmet demand | Honesty about data limits |
+| Unmet-demand proxy | Treat as official unmet demand | Honesty about what the public data supports |
 
 ## Uncertainty
 
-The expansion score is a **decision-support screen**, not a forecast of ROI, passenger diversion, or construction feasibility. Multi-month OTP/T-100 windows reduce single-month seasonality but still reflect publication lag and domestic coverage limits; incomplete small-airport OTP rows also reduce precision. The product should surface those caveats whenever material.
+The expansion score is a **decision-support screen** for capacity/expansion screening. Multi-month OTP/T-100 windows reduce single-month seasonality but still reflect publication lag and domestic coverage limits; incomplete small-airport OTP rows also reduce precision. Material caveats are surfaced in assumptions / confidence.
 
 ### Deterministic confidence
 
-When structured airport score cards are present, UI confidence is **overridden server-side** from missing components among the top results:
+When structured airport score cards are present, UI confidence is **set server-side** from component completeness among the top results:
 
 - Complete components → High  
 - One critical component missing (e.g. congestion) → Medium  
 - Multiple critical gaps → Low  
 
-For proxy / insight-only answers (unmet demand, congestion, long-haul) without ranking cards, confidence is capped at **Medium** with an explicit assumption line — never an unjustified High.
+For proxy / insight-only answers (unmet demand, congestion, long-haul) without ranking cards, confidence is capped at **Medium** with an explicit assumption line.

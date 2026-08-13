@@ -12,7 +12,7 @@ The LLM explains findings and selects tools. **All scores, rankings, congestion 
 - Report congestion signals from BTS on-time data
 - Report long-haul departure share with an explicit distance threshold
 - Provide an **Estimated Unmet Demand Proxy** (clearly labeled as a proxy)
-- Preserve conversational follow-ups
+- Preserve conversational follow-ups across turns in the same chat
 
 ## Architecture overview
 
@@ -36,7 +36,6 @@ LangChain tools → Agent → Next.js UI
 | Design / architecture doc (scoring · tradeoffs · where AI is used) | [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md) |
 
 See also the scoring summary and assumptions below for a short interview-ready overview.
-
 
 ## How to run locally
 
@@ -63,18 +62,25 @@ Open [http://localhost:3000](http://localhost:3000).
 | `ELEVENLABS_VOICE_ID` | No | Defaults to a multilingual voice |
 | `ELEVENLABS_MODEL_ID` | No | Fallback model; non-English prefers flash/turbo + `language_code` |
 
-The app runs without LangSmith. Chat works without ElevenLabs; speaker buttons need the key.
+LangSmith and ElevenLabs are optional. Chat runs with only `OPENAI_API_KEY`; speaker buttons need the ElevenLabs key.
 
-## Privacy of chats (no account system)
+## Chat sessions
 
-- Each browser gets an anonymous **local user id** in `localStorage`.
-- Conversations are saved only under that id on the device — other browsers/users do not see them.
-- The server is **stateless** (history is sent per request) and never merges chats across clients.
-- Use **Reset local user** in the sidebar to mint a new anonymous identity.
+Sessions are **private and browser-local** (anonymous `clientUserId` in `localStorage`). Conversations are stored under `airport-agent:v1:store:{userId}` on that device.
+
+- Each `/api/chat` request sends history from the client (last 40 turns). The server handles the turn and returns SSE; the browser owns the transcript.
+- User turns are marked `pending` and persisted; on `final`, the assistant reply is written into the conversation that started the request (`applyAssistantReply`), including after chat switches.
+- Switching chats or **New chat** leaves other in-flight requests running. Only a newer send in the **same** conversation supersedes the previous turn.
+- After a refresh, pending user turns are rediscovered and retried (`findPendingRetries`). Cancelled unload fetches are not saved as fake assistant failures (`isUnloadNetworkError`).
+- Desktop: sidebar history. Mobile (`xl` and below): drawer for history / New chat / Reset. In-flight rows show a pulse while loading or still `pending`.
+- **Reset local user** mints a new anonymous identity.
+- Header: **Private local session · scores deterministic**.
+
+Closing the tab ends client-side processing for that browser session (exam scope: client store, not multi-device sync).
 
 ## Data sources (public government HTTP)
 
-Data is gathered programmatically from **public government APIs/downloads**, normalized, then served from local cache. Chat turns do not re-fetch ArcGIS on every message.
+Data is gathered programmatically from **public government APIs/downloads**, normalized, then served from local cache. Chat turns use the hydrated provider rather than re-fetching ArcGIS on every message.
 
 ### REST APIs (provider + disk cache)
 
@@ -145,26 +151,27 @@ ELEVENLABS_API_KEY=...
 | Market scale | 15% | CY2024 enplanements |
 | Route opportunity | 10% | Long-haul departure share |
 
-Missing components stay `null` and are excluded (remaining weights renormalized). The LLM cannot alter scores.
+Missing components stay `null` and are excluded (remaining weights renormalized). Scores come only from TypeScript; the LLM cannot alter them.
 
 Regional ranking screens also apply a default **minimum 250,000 CY2024 enplanements** filter so tiny seasonal fields do not dominate growth percentiles. Explicit IATA comparisons skip that filter.
 
 ## Assumptions
 
-- New England = CT, ME, MA, NH, RI, VT (code-defined, not LLM-defined)
+- New England = CT, ME, MA, NH, RI, VT (code-defined)
 - Long-haul = route distance **≥ 1,500 miles** (documented project definition)
 - OTP metrics aggregate **2025-01..2026-06**; T-100 aggregates **2025-01..2026-04** (full calendar 2025 through each table’s latest public month; publication lag differs). Enplanements remain annual FAA CY2023–CY2024.
-- Unmet demand is a **proxy**, not an official government measurement
+- Unmet demand is an **Estimated Unmet Demand Proxy**, not an official government series
 - Dataset covers curated commercial airports (all New England + large/medium hubs + comparison set)
 
-## Known limitations
+## Working status (UI)
 
-- Not a financial forecast or investment recommendation
-- Monthly operational extracts can be seasonally skewed
-- T-100 extract is domestic U.S. carrier segment data
+While tools run, the Working card shows live tool rows. After tools finish and the model is drafting, `WorkingStatusLine` rotates short tips and **stops on the last tip**: *Almost ready — polishing the investment framing…*
+
+## Scope notes
+
+- Screening heuristic for analysts (decision support), with fixed scoring weights
+- Monthly operational extracts can be seasonally skewed; T-100 is domestic U.S. carrier segment data
 - Some small airports lack OTP coverage (`onTime: null`)
-- Scoring weights are fixed configuration (follow-ups cannot invent reweighted ranks)
-- Custom weight scenarios are not supported as a tool — the agent must explain the limitation
 
 ## Testing
 
@@ -192,8 +199,9 @@ This runs one ANC long-haul turn, prints tool vs LLM timings, and lists recent L
 
 ```text
 src/app/                 Next.js UI + /api/chat
-src/components/chat/     Chat interface
-src/lib/agent/           LangChain agent, tools, prompts
+src/components/chat/     Chat UI (incl. WorkingStatusLine, mobile drawer)
+src/lib/chat/            localStorage session store + unload-error helpers
+src/lib/agent/           LangChain tools, agent, prompts, model token budget
 src/lib/aviation/        Data provider + types + regions
 src/lib/analytics/       Congestion, long-haul, unmet-demand, normalization
 src/lib/scoring/         Deterministic score + rank

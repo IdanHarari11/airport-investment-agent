@@ -35,6 +35,9 @@ describe("computeDeterministicConfidence", () => {
       }),
     ]);
     expect(result.confidence).toBe("high");
+    expect(result.reason).toMatch(
+      /all required scoring components are available for the top-ranked airports/i,
+    );
   });
 
   it("returns medium when congestion is missing for a top airport", () => {

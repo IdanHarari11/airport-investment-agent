@@ -65,7 +65,7 @@ export function computeDeterministicConfidence(
   return {
     confidence: "high",
     reason:
-      "Overall ranking confidence: High — complete data across scoring components for the top results.",
+      "Overall ranking confidence: High — all required scoring components are available for the top-ranked airports.",
   };
 }
 

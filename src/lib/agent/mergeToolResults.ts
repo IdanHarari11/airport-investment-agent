@@ -78,6 +78,21 @@ function normalizeSource(raw: unknown): AgentResponse["sources"][number] | null 
   };
 }
 
+/** Keep first occurrence per source name (case-insensitive). */
+export function dedupeSources(
+  sources: AgentResponse["sources"],
+): AgentResponse["sources"] {
+  const seen = new Set<string>();
+  const out: AgentResponse["sources"] = [];
+  for (const source of sources) {
+    const key = source.name.trim().toLowerCase();
+    if (!key || seen.has(key)) continue;
+    seen.add(key);
+    out.push(source);
+  }
+  return out;
+}
+
 function collectToolPayloads(
   messages: BaseMessage[],
 ): Array<{ name: string; data: Record<string, unknown> }> {
@@ -314,13 +329,21 @@ export function mergeAirportsFromToolMessages(
     longHaul: longHaul ?? (sawTools ? null : response.longHaul),
     unmetDemand: unmetDemand ?? (sawTools ? null : response.unmetDemand),
     assumptions,
-    sources,
+    sources: dedupeSources(sources),
   };
 }
 
 const SCORING_ASSUMPTIONS = [
-  "Scores are relative to the comparison cohort (percentile ranks).",
-  "Missing score components are excluded and remaining weights are renormalized.",
+  {
+    text: "Scores are relative to the comparison cohort (percentile ranks).",
+    alreadyCovered: (item: string) =>
+      /comparison cohort|percentile ranks/i.test(item),
+  },
+  {
+    text: "Missing score components are excluded and remaining weights are renormalized.",
+    alreadyCovered: (item: string) =>
+      /renormaliz/i.test(item) && /missing/i.test(item),
+  },
 ];
 
 function hasScoringCards(response: AgentResponse): boolean {
@@ -350,8 +373,11 @@ export function enrichAgentResponse(response: AgentResponse): AgentResponse {
   }
   if (hasScoringCards(response)) {
     for (const item of SCORING_ASSUMPTIONS) {
-      if (!assumptions.includes(item)) {
-        assumptions.push(item);
+      if (
+        !assumptions.some((existing) => item.alreadyCovered(existing)) &&
+        !assumptions.includes(item.text)
+      ) {
+        assumptions.push(item.text);
       }
     }
   }
@@ -363,15 +389,19 @@ export function enrichAgentResponse(response: AgentResponse): AgentResponse {
     }
   }
 
-  let sources = [...response.sources];
-  if (sources.length === 0) {
-    sources = provider.getSources().map((source) => ({
-      name: source.name || "Aviation data source",
-      url: source.url ?? null,
-      period: source.period ?? null,
-      notes: source.notes ?? null,
-    }));
-  }
+  // Prefer authoritative provider sources for aviation answers so the LLM
+  // cannot invent duplicates or stale periods.
+  const providerSources = provider.getSources().map((source) => ({
+    name: source.name || "Aviation data source",
+    url: source.url ?? null,
+    period: source.period ?? null,
+    notes: source.notes ?? null,
+  }));
+  const sources = dedupeSources(
+    hasCachedAviationInsights(response) || response.sources.length === 0
+      ? providerSources
+      : [...response.sources, ...providerSources],
+  );
 
   return {
     ...response,
