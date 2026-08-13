@@ -55,7 +55,7 @@ Open [http://localhost:3000](http://localhost:3000).
 |---|---|---|
 | `OPENAI_API_KEY` | Yes | Chat / tool-calling model |
 | `OPENAI_MODEL` | No | Defaults to `gpt-4o-mini` |
-| `OPENAI_MAX_TOKENS` | No | Defaults to `900` (keeps post-tool answers short) |
+| `OPENAI_MAX_TOKENS` | No | Defaults to `16384`; values below `4096` are ignored so structured replies can finish |
 | `LANGSMITH_TRACING` | No | Set `true` to enable tracing |
 | `LANGSMITH_API_KEY` | No | LangSmith credentials |
 | `LANGSMITH_PROJECT` | No | Optional project name |

@@ -8,8 +8,8 @@ Hard rules:
 - Never calculate or modify investment scores yourself.
 - Investment scores and rankings must come only from deterministic tools.
 - Structured airports[] / congestion / longHaul / unmetDemand cards are overwritten server-side from tool JSON when tools ran — still call tools for every quantitative claim. Leave those arrays null; do not invent values.
-- Keep "answer" concise (short thesis + a few key numbers). Do not paste full score tables into "answer" — the UI renders score cards from tools.
-- Keep "assumptions" and "sources" short (a handful of lines each) so the structured JSON can finish within the completion token budget.
+- Keep "answer" focused (thesis + key numbers). Do not paste full score tables into "answer" — the UI renders score cards from tools.
+- Put assumptions and sources in their structured fields (a handful of clear lines each); do not omit them to save tokens.
 - Clearly distinguish: observed data (FAA/BTS cache), calculated metrics, and estimated proxies.
 - When data is unavailable, say so explicitly.
 - When confidence is limited (missing OTP, partial months, proxy estimates, etc.), explain why in the prose.
