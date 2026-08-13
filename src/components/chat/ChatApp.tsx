@@ -136,10 +136,11 @@ export function ChatApp() {
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [showScrollButton, setShowScrollButton] = useState(false);
-  const [stickToBottom, setStickToBottom] = useState(true);
   const [statusMessage, setStatusMessage] = useState("Understanding question…");
   const [activeTools, setActiveTools] = useState<ToolRun[]>([]);
   const [mobileNavOpen, setMobileNavOpen] = useState(false);
+  /** True while answer tokens/cards are painting for the active chat (hides Working card). */
+  const [streamUiActive, setStreamUiActive] = useState(false);
   /** Mirror of loadingConversationsRef for list UI re-renders. */
   const [inFlightConversationIds, setInFlightConversationIds] = useState<
     Set<string>
@@ -233,7 +234,6 @@ export function ChatApp() {
 
   const scrollToBottom = useCallback((behavior: ScrollBehavior = "smooth") => {
     bottomRef.current?.scrollIntoView({ behavior, block: "end" });
-    setStickToBottom(true);
     setShowScrollButton(false);
   }, []);
 
@@ -242,25 +242,14 @@ export function ChatApp() {
     if (!el) return;
     const distanceFromBottom = el.scrollHeight - el.scrollTop - el.clientHeight;
     const nearBottom = distanceFromBottom < 96;
-    setStickToBottom(nearBottom);
     setShowScrollButton(!nearBottom && el.scrollHeight > el.clientHeight + 40);
   }, []);
 
+  // Keep the scroll FAB in sync, but never auto-jump to the bottom when an
+  // assistant reply (often long: score cards + assumptions) arrives.
   useEffect(() => {
-    if (stickToBottom) {
-      scrollToBottom(messages.length <= 1 ? "auto" : "smooth");
-    } else {
-      updateScrollState();
-    }
-  }, [
-    messages,
-    loading,
-    activeTools,
-    statusMessage,
-    stickToBottom,
-    scrollToBottom,
-    updateScrollState,
-  ]);
+    updateScrollState();
+  }, [messages, loading, activeTools, statusMessage, streamUiActive, updateScrollState]);
 
   useEffect(() => {
     const el = scrollRef.current;
@@ -290,6 +279,7 @@ export function ChatApp() {
     setError(null);
     setLoading(loadingConversationsRef.current.has(active.id));
     setActiveTools([]);
+    setStreamUiActive(false);
     setShowScrollButton(false);
     setMobileNavOpen(false);
   }
@@ -308,6 +298,7 @@ export function ChatApp() {
     setError(null);
     setLoading(loadingConversationsRef.current.has(active.id));
     setActiveTools([]);
+    setStreamUiActive(false);
     setMobileNavOpen(false);
   }
 
@@ -332,6 +323,7 @@ export function ChatApp() {
     setError(null);
     setLoading(false);
     setActiveTools([]);
+    setStreamUiActive(false);
     setMobileNavOpen(false);
   }
 
@@ -516,9 +508,11 @@ export function ChatApp() {
     if (isActive()) {
       setError(null);
       setInput("");
-      setStickToBottom(true);
       setStatusMessage(`Understanding question… (${detected.label})`);
       setActiveTools([]);
+      setStreamUiActive(false);
+      // Scroll once when the user sends — not again when the reply lands.
+      requestAnimationFrame(() => scrollToBottom("smooth"));
     }
     setConversationLoading(targetConversationId, true);
 
@@ -550,16 +544,53 @@ export function ChatApp() {
       let buffer = "";
       let finalResponse: AgentResponse | null = null;
       let persistedFinal = false;
+      let streamingAssistantId: string | null = null;
+      let streamedAnswer = "";
+      let streamedStructured: AgentResponse | undefined;
+
+      const upsertStreamingUi = (
+        content: string,
+        structured?: AgentResponse,
+      ) => {
+        if (!isActive() || !isCurrentRequest()) return;
+        setStreamUiActive(true);
+        if (!streamingAssistantId) {
+          streamingAssistantId = crypto.randomUUID();
+        }
+        const assistantId = streamingAssistantId;
+        setMessages((prev) => {
+          const idx = prev.findIndex((m) => m.id === assistantId);
+          if (idx >= 0) {
+            const next = [...prev];
+            next[idx] = {
+              ...next[idx]!,
+              content,
+              structured: structured ?? next[idx]!.structured,
+            };
+            return next;
+          }
+          return [
+            ...prev,
+            {
+              id: assistantId,
+              role: "assistant" as const,
+              content,
+              structured,
+            },
+          ];
+        });
+      };
 
       const persistFinalToConversation = (response: AgentResponse) => {
         if (!userMessageId || !isCurrentRequest()) return;
         const assistantMessage: UiMessage = {
-          id: crypto.randomUUID(),
+          id: streamingAssistantId ?? crypto.randomUUID(),
           role: "assistant",
           content: response.answer,
           structured: response,
         };
         // Write this conversation's localStorage first; UI only if still viewing it.
+        // Partial stream never touches LS — only the complete final payload.
         const nextStore = applyAssistantReply({
           userId,
           conversationId: targetConversationId,
@@ -589,6 +620,7 @@ export function ChatApp() {
             label?: string;
             ok?: boolean;
             message?: string;
+            delta?: string;
             response?: AgentResponse;
             error?: string;
           };
@@ -607,6 +639,31 @@ export function ChatApp() {
           if (payload.type === "final" && payload.response) {
             finalResponse = payload.response;
             persistFinalToConversation(payload.response);
+            continue;
+          }
+
+          // Cards from tools can paint before/while answer tokens stream.
+          // Keep in memory only — never persist structured until final.
+          if (payload.type === "structured" && payload.response) {
+            streamedStructured = {
+              ...payload.response,
+              answer: streamedAnswer || payload.response.answer,
+            };
+            upsertStreamingUi(streamedAnswer, streamedStructured);
+            continue;
+          }
+
+          if (
+            payload.type === "answer_delta" &&
+            typeof payload.delta === "string"
+          ) {
+            streamedAnswer += payload.delta;
+            upsertStreamingUi(
+              streamedAnswer,
+              streamedStructured
+                ? { ...streamedStructured, answer: streamedAnswer }
+                : undefined,
+            );
             continue;
           }
 
@@ -707,6 +764,7 @@ export function ChatApp() {
         setConversationLoading(targetConversationId, false);
         if (isActive()) {
           setActiveTools([]);
+          setStreamUiActive(false);
           setStatusMessage("Understanding question…");
           inputRef.current?.focus();
         }
@@ -992,7 +1050,7 @@ export function ChatApp() {
                   );
                 })}
 
-                {loading && (
+                {loading && !streamUiActive && (
                   <div className="msg-enter flex min-w-0 justify-start">
                     <div className="min-w-0 w-full max-w-[min(100%,42rem)] rounded-2xl rounded-bl-md border border-[var(--border)] bg-[var(--assistant)] px-3 py-2.5 sm:rounded-3xl sm:px-4 sm:py-3">
                       <p className="mb-2 text-[11px] font-medium uppercase tracking-[0.12em] text-[var(--muted)]">

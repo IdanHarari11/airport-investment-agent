@@ -1,5 +1,11 @@
 import { createAgent, createMiddleware } from "langchain";
-import { HumanMessage, AIMessage, BaseMessage } from "@langchain/core/messages";
+import {
+  AIMessage,
+  HumanMessage,
+  SystemMessage,
+  ToolMessage,
+  BaseMessage,
+} from "@langchain/core/messages";
 import {
   createAviationDataProvider,
   getAviationDataProvider,
@@ -39,7 +45,33 @@ export type ToolProgressEvent =
       message: string;
     };
 
+/** SSE / client-facing stream events from the agent turn. */
+export type AgentStreamEvent =
+  | ToolProgressEvent
+  | {
+      type: "structured";
+      response: AgentResponse;
+    }
+  | {
+      type: "answer_delta";
+      delta: string;
+    }
+  | {
+      type: "final";
+      response: AgentResponse;
+    };
+
 export type AgentProgressHandler = (event: ToolProgressEvent) => void;
+
+const MAX_TOOL_ROUNDS = 8;
+
+const ANSWER_STREAM_INSTRUCTION = `
+
+Final response mode:
+- Write the analyst-facing answer as markdown prose only (not JSON).
+- Never invent airport metrics, scores, rankings, or percentages — use only tool results in this conversation.
+- Do not paste full score tables into the answer; the UI renders score/insight cards from tools.
+- Keep the answer focused (thesis + key numbers + uncertainty). Assumptions/sources/confidence are attached by the server.`;
 
 function configureLangSmithTracing(): void {
   if (process.env.LANGSMITH_TRACING === "true" && process.env.LANGSMITH_API_KEY) {
@@ -131,6 +163,19 @@ function fallbackStructured(answer: string): AgentResponse {
   };
 }
 
+function emptyStructuredSkeleton(): AgentResponse {
+  return {
+    answer: "",
+    airports: null,
+    congestion: null,
+    longHaul: null,
+    unmetDemand: null,
+    assumptions: [],
+    confidence: "medium",
+    sources: [],
+  };
+}
+
 function createProgressMiddleware(onProgress?: AgentProgressHandler) {
   return createMiddleware({
     name: "toolProgressReporter",
@@ -172,6 +217,21 @@ function finalizeAgentResponse(
   return applyDeterministicConfidence(enriched);
 }
 
+/** Deterministic cards/metadata from tool messages (answer may still be empty). */
+export function buildStructuredFromToolMessages(
+  messages: BaseMessage[],
+  answer = "",
+): AgentResponse {
+  const base =
+    answer.trim().length > 0
+      ? fallbackStructured(answer)
+      : emptyStructuredSkeleton();
+  return finalizeAgentResponse(
+    { ...base, answer: answer.trim().length > 0 ? answer : base.answer },
+    messages,
+  );
+}
+
 function parseAgentResult(result: {
   structuredResponse?: unknown;
   messages: BaseMessage[];
@@ -195,6 +255,147 @@ function parseAgentResult(result: {
     fallbackStructured(content || "No response generated."),
     messages,
   );
+}
+
+function resolveUserContent(params: {
+  message: string;
+  language?: string;
+}): string {
+  const lang = params.language ? toDetectedLanguage(params.language) : null;
+  return lang
+    ? `${languageInstruction(lang)}\n\n${params.message}`
+    : params.message;
+}
+
+/**
+ * Stream a turn: tool progress → structured cards (from tools) → answer deltas → final.
+ * Cards are deterministic from tool JSON; the model only streams narrative prose.
+ */
+export async function* streamAirportAgent(params: {
+  message: string;
+  history?: ChatMessage[];
+  language?: string;
+}): AsyncGenerator<AgentStreamEvent, AgentResponse, void> {
+  configureLangSmithTracing();
+  yield { type: "status", message: "Understanding question…" };
+
+  await getAviationDataProvider();
+  const dataCurrency = getDataCurrencySummary();
+  const history = (params.history ?? []).slice(-40);
+
+  const model = await createChatModel();
+  if (typeof model.bindTools !== "function") {
+    throw new Error("Chat model does not support tool binding");
+  }
+  const bound = model.bindTools(agentTools);
+  const toolsByName = new Map<
+    string,
+    { invoke: (input: unknown) => Promise<unknown> }
+  >(
+    agentTools.map((tool) => [
+      tool.name,
+      tool as { invoke: (input: unknown) => Promise<unknown> },
+    ]),
+  );
+
+  const toolMessages: BaseMessage[] = [
+    new SystemMessage(buildSystemPrompt(dataCurrency.brief)),
+    ...toLangChainMessages(history),
+    new HumanMessage(resolveUserContent(params)),
+  ];
+
+  for (let round = 0; round < MAX_TOOL_ROUNDS; round += 1) {
+    yield {
+      type: "status",
+      message: round === 0 ? "Selecting tools…" : "Selecting follow-up tools…",
+    };
+
+    const ai = await bound.invoke(toolMessages);
+    const toolCalls = ai.tool_calls ?? [];
+    if (toolCalls.length === 0) {
+      // Model is ready to answer — discard this non-streamed completion.
+      break;
+    }
+
+    toolMessages.push(ai);
+
+    for (const call of toolCalls) {
+      const name = call.name ?? "unknown_tool";
+      const label = toolLabel(name);
+      const toolCallId = call.id ?? `tool-${round}-${name}`;
+      yield { type: "tool_start", name, label };
+      yield { type: "status", message: `Running ${label}…` };
+
+      try {
+        const tool = toolsByName.get(name);
+        if (!tool) {
+          throw new Error(`Unknown tool: ${name}`);
+        }
+        const raw = await tool.invoke(call.args);
+        const content = typeof raw === "string" ? raw : JSON.stringify(raw);
+        toolMessages.push(
+          new ToolMessage({
+            content,
+            tool_call_id: toolCallId,
+            name,
+          }),
+        );
+        yield { type: "tool_end", name, label, ok: true };
+      } catch (error) {
+        toolMessages.push(
+          new ToolMessage({
+            content: JSON.stringify({
+              error:
+                error instanceof Error ? error.message : "Tool execution failed",
+            }),
+            tool_call_id: toolCallId,
+            name,
+          }),
+        );
+        yield { type: "tool_end", name, label, ok: false };
+        yield {
+          type: "status",
+          message: "Recovering from a tool error…",
+        };
+      }
+    }
+
+    yield {
+      type: "status",
+      message: "Drafting explanation from tool results…",
+    };
+  }
+
+  const structured = buildStructuredFromToolMessages(toolMessages);
+  yield { type: "structured", response: structured };
+
+  yield {
+    type: "status",
+    message: "Drafting explanation from tool results…",
+  };
+
+  const answerMessages: BaseMessage[] = [
+    new SystemMessage(
+      `${buildSystemPrompt(dataCurrency.brief)}${ANSWER_STREAM_INSTRUCTION}`,
+    ),
+    ...toolMessages.slice(1),
+  ];
+
+  let answer = "";
+  const stream = await model.stream(answerMessages);
+  for await (const chunk of stream) {
+    const delta = messageContentToText(chunk.content);
+    if (!delta) continue;
+    answer += delta;
+    yield { type: "answer_delta", delta };
+  }
+
+  const finalResponse = buildStructuredFromToolMessages(
+    toolMessages,
+    answer.trim() || "No response generated.",
+  );
+  yield { type: "final", response: finalResponse };
+  return finalResponse;
 }
 
 export async function runAirportAgent(params: {
@@ -224,12 +425,7 @@ export async function runAirportAgent(params: {
   });
 
   const history = (params.history ?? []).slice(-40);
-  const lang = params.language
-    ? toDetectedLanguage(params.language)
-    : null;
-  const userContent = lang
-    ? `${languageInstruction(lang)}\n\n${params.message}`
-    : params.message;
+  const userContent = resolveUserContent(params);
 
   params.onProgress?.({
     type: "status",

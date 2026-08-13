@@ -1,5 +1,5 @@
 import { z } from "zod";
-import { runAirportAgent } from "@/lib/agent/agent";
+import { runAirportAgent, streamAirportAgent } from "@/lib/agent/agent";
 import type { ChatMessage } from "@/lib/agent/types";
 import { toPublicErrorMessage } from "@/lib/security/publicErrors";
 import {
@@ -108,13 +108,14 @@ export async function POST(request: Request) {
       };
 
       try {
-        const response = await runAirportAgent({
+        // tools → structured cards → answer_delta tokens → final AgentResponse
+        for await (const event of streamAirportAgent({
           message: parsed.data.message,
           history,
           language: parsed.data.language,
-          onProgress: (event) => send(event),
-        });
-        send({ type: "final", response });
+        })) {
+          send(event);
+        }
       } catch (error) {
         console.error("chat agent error", error);
         const publicError = toPublicErrorMessage(error);
