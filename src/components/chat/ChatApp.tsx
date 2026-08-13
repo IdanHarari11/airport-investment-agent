@@ -10,6 +10,7 @@ import {
   useState,
 } from "react";
 import type { AgentResponse } from "@/lib/agent/types";
+import { isUnloadNetworkError } from "@/lib/chat/isUnloadNetworkError";
 import {
   applyAssistantReply,
   clearMessagePending,
@@ -156,10 +157,24 @@ export function ChatApp() {
   const conversationIdRef = useRef(conversationId);
   const loadingConversationsRef = useRef<Set<string>>(new Set());
   const resumeStartedRef = useRef(false);
+  /** True after pagehide/beforeunload — fetch may fail before signal.aborted. */
+  const unloadingRef = useRef(false);
 
   useEffect(() => {
     conversationIdRef.current = conversationId;
   }, [conversationId]);
+
+  useEffect(() => {
+    const markUnloading = () => {
+      unloadingRef.current = true;
+    };
+    window.addEventListener("pagehide", markUnloading);
+    window.addEventListener("beforeunload", markUnloading);
+    return () => {
+      window.removeEventListener("pagehide", markUnloading);
+      window.removeEventListener("beforeunload", markUnloading);
+    };
+  }, []);
 
   useEffect(() => {
     const userId = getOrCreateClientUserId();
@@ -635,6 +650,16 @@ export function ChatApp() {
             if (active) setMessages(active.messages);
           }
         }
+        return;
+      }
+      // Refresh/navigation: fetch rejects with "network error" before aborted=true.
+      // Keep pending so findPendingRetries can resume after hydrate — do not persist a fake failure.
+      if (
+        isUnloadNetworkError(err, {
+          unloading: unloadingRef.current,
+          aborted: controller.signal.aborted,
+        })
+      ) {
         return;
       }
       const text = err instanceof Error ? err.message : "Unexpected error";
