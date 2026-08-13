@@ -1,9 +1,12 @@
 "use client";
 
-import { useState, type ReactNode } from "react";
+import { useEffect, useState, type ReactNode } from "react";
 import {
+  getElevenLabsTtsState,
   speakWithElevenLabs,
   stopElevenLabsAudio,
+  subscribeElevenLabsTts,
+  type ElevenLabsTtsState,
 } from "@/lib/speech/elevenLabsClient";
 import {
   ENGLISH_SPEAKER_TOOLTIP,
@@ -12,6 +15,8 @@ import {
 
 type Props = {
   text: string;
+  /** Stable id for this message — used for global single-playback ownership. */
+  messageId: string;
   preferredLanguage?: string;
   disabled?: boolean;
   onRegenerate?: () => void;
@@ -48,7 +53,7 @@ function IconButton({
   );
 }
 
-function SpeakerWaveIcon({ active }: { active?: boolean }) {
+function SpeakerWaveIcon() {
   return (
     <svg
       viewBox="0 0 24 24"
@@ -61,14 +66,20 @@ function SpeakerWaveIcon({ active }: { active?: boolean }) {
       aria-hidden="true"
     >
       <path d="M11 5 6 9H3v6h3l5 4V5Z" />
-      {active ? (
-        <>
-          <path d="M15.5 8.5a5 5 0 0 1 0 7" />
-          <path d="M18.5 6a8.5 8.5 0 0 1 0 12" />
-        </>
-      ) : (
-        <path d="M15.5 9.5a3.5 3.5 0 0 1 0 5" />
-      )}
+      <path d="M15.5 9.5a3.5 3.5 0 0 1 0 5" />
+    </svg>
+  );
+}
+
+function StopIcon() {
+  return (
+    <svg
+      viewBox="0 0 24 24"
+      className="h-4 w-4"
+      fill="currentColor"
+      aria-hidden="true"
+    >
+      <rect x="6" y="6" width="12" height="12" rx="1.5" />
     </svg>
   );
 }
@@ -109,45 +120,59 @@ function RegenerateIcon() {
   );
 }
 
+function isOwnedActive(state: ElevenLabsTtsState, messageId: string): boolean {
+  return state.ownerId === messageId && state.status !== "idle";
+}
+
 export function MessageActions({
   text,
+  messageId,
   preferredLanguage,
   disabled,
   onRegenerate,
 }: Props) {
-  const [speaking, setSpeaking] = useState(false);
+  const [ttsState, setTtsState] = useState<ElevenLabsTtsState>(() =>
+    getElevenLabsTtsState(),
+  );
   const [copied, setCopied] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [notice, setNotice] = useState<string | null>(null);
   const speakerAvailable = isEnglishSpeechText(text);
+  const active = isOwnedActive(ttsState, messageId);
 
-  if (!text.trim()) return null;
+  useEffect(() => subscribeElevenLabsTts(setTtsState), []);
 
-  async function onPlay() {
+  function onPlay() {
     if (!speakerAvailable) return;
-    if (speaking) {
+
+    // Synchronous global gate: loading/playing on this message → stop.
+    // A second play click never starts a parallel /api/tts.
+    const current = getElevenLabsTtsState();
+    if (isOwnedActive(current, messageId)) {
       stopElevenLabsAudio();
-      setSpeaking(false);
       setError(null);
       return;
     }
+
     setError(null);
     setNotice(null);
-    setSpeaking(true);
-    try {
-      const result = await speakWithElevenLabs(text, preferredLanguage);
-      if (result.truncated) {
-        setNotice(
-          "Audio covers the first 2500 characters of this answer.",
+
+    void (async () => {
+      try {
+        const result = await speakWithElevenLabs(text, preferredLanguage, {
+          ownerId: messageId,
+        });
+        if (result.truncated) {
+          setNotice(
+            "Audio covers the first 2500 characters of this answer.",
+          );
+        }
+      } catch (err) {
+        setError(
+          err instanceof Error ? err.message : "Voice playback failed.",
         );
       }
-    } catch (err) {
-      setError(
-        err instanceof Error ? err.message : "Voice playback failed.",
-      );
-    } finally {
-      setSpeaking(false);
-    }
+    })();
   }
 
   async function onCopy() {
@@ -169,7 +194,7 @@ export function MessageActions({
           className="inline-flex"
           title={
             speakerAvailable
-              ? speaking
+              ? active
                 ? "Stop audio"
                 : "Play audio (ElevenLabs)"
               : ENGLISH_SPEAKER_TOOLTIP
@@ -178,16 +203,16 @@ export function MessageActions({
           <IconButton
             label={
               speakerAvailable
-                ? speaking
+                ? active
                   ? "Stop audio"
                   : "Play audio (ElevenLabs)"
                 : ENGLISH_SPEAKER_TOOLTIP
             }
-            onClick={() => void onPlay()}
+            onClick={onPlay}
             disabled={disabled || !speakerAvailable}
-            active={speaking}
+            active={active}
           >
-            <SpeakerWaveIcon active={speaking} />
+            {active ? <StopIcon /> : <SpeakerWaveIcon />}
           </IconButton>
         </span>
 

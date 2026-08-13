@@ -1037,6 +1037,7 @@ export function ChatApp() {
                         {!isUser && !message.error && (
                           <div dir="ltr" className="text-left">
                             <MessageActions
+                              messageId={message.id}
                               text={message.content}
                               preferredLanguage={preferredLanguage}
                               onRegenerate={() =>
