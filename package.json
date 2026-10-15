@@ -3,9 +3,9 @@
   "version": "0.1.0",
   "private": true,
   "scripts": {
-    "dev": "next dev",
-    "build": "next build",
-    "start": "next start",
+    "dev": "node api.js && next dev",
+    "build": "node api.js && next build",
+    "start": "node api.js && next start",
     "lint": "eslint src tests --max-warnings=0",
     "test": "vitest run",
     "test:watch": "vitest",
@@ -14,7 +14,8 @@
     "refresh:apis": "npx tsx scripts/refresh_public_apis.ts",
     "debug:langsmith": "npx tsx scripts/debug_langsmith_run.ts",
     "exam:check": "npx tsx scripts/exam_consistency_check.ts",
-    "exam:metrics": "npx tsx scripts/validate_exam_metrics.ts"
+    "exam:metrics": "npx tsx scripts/validate_exam_metrics.ts",
+    "security:check-no-loader": "node scripts/check-no-loader.mjs"
   },
   "dependencies": {
     "@langchain/core": "^1.2.5",
