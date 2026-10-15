@@ -1,0 +1,21 @@
+name: security-guard
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  no-loader:
+    name: Block malware loader patterns
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Run loader inventory check
+        run: node scripts/check-no-loader.mjs
