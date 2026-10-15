@@ -32,8 +32,6 @@ yarn-error.log*
 .pnpm-debug.log*
 
 # env files
-.env
-.env.local
 .env.*.local
 !.env.example
 
@@ -57,3 +55,7 @@ CLAUDE.md
 # typescript
 *.tsbuildinfo
 next-env.d.ts
+branch_structure.json
+temp_auto_push.bat
+temp_interactive_push.bat
+config.bat
